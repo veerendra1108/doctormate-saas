@@ -64,6 +64,20 @@ export const HospitalRegistrationModal: React.FC<HospitalRegistrationModalProps>
       return;
     }
 
+    const cleanedAdminMobile = formData.adminMobile.replace(/\D/g, '');
+    if (!cleanedAdminMobile || cleanedAdminMobile.length !== 10) {
+      setError('Please enter a valid 10-digit administrator mobile number.');
+      return;
+    }
+
+    if (formData.phone) {
+      const cleanedPhone = formData.phone.replace(/\D/g, '');
+      if (cleanedPhone.length < 10) {
+        setError('Please enter a valid 10-digit hospital contact phone.');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
       const res = await fetch('/api/hospitals/register', {
@@ -288,8 +302,10 @@ export const HospitalRegistrationModal: React.FC<HospitalRegistrationModalProps>
                     name="adminMobile"
                     value={formData.adminMobile}
                     onChange={handleChange}
-                    placeholder="e.g. 9848012345"
+                    placeholder="e.g. 9848012345 (10 digits)"
                     maxLength={10}
+                    minLength={10}
+                    pattern="[0-9]{10}"
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium"
                     required
                   />

@@ -121,6 +121,18 @@ apiRouter.post('/hospitals/register', (req, res) => {
     return res.status(400).json({ error: 'Hospital name, administrator name, email, and password are required.' });
   }
 
+  const cleanedAdminMobile = String(adminMobile || '').replace(/\D/g, '');
+  if (!cleanedAdminMobile || cleanedAdminMobile.length !== 10) {
+    return res.status(400).json({ error: 'Please enter a valid 10-digit administrator mobile number.' });
+  }
+
+  if (phone) {
+    const cleanedPhone = String(phone).replace(/\D/g, '');
+    if (cleanedPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit hospital contact phone.' });
+    }
+  }
+
   const state = db.getState();
   if (!state.hospitals) state.hospitals = [];
   if (!state.hospitalAdmins) state.hospitalAdmins = [];

@@ -21,16 +21,22 @@ import { Hospital, Doctor, HospitalAdminUser, Appointment } from '../types/index
 
 interface HospitalAdminDashboardProps {
   hospitalId: string;
-  adminUser: HospitalAdminUser;
+  adminUser?: HospitalAdminUser;
+  adminName?: string;
   onLogout: () => void;
+  onNavigateToBooking?: (slug: string) => void;
   onOpenBookingPreview?: (slug: string) => void;
+  onLaunchOnboarding?: (hosp: Hospital) => void;
 }
 
 export const HospitalAdminDashboard: React.FC<HospitalAdminDashboardProps> = ({
   hospitalId,
   adminUser,
+  adminName,
   onLogout,
+  onNavigateToBooking,
   onOpenBookingPreview,
+  onLaunchOnboarding,
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -186,7 +192,8 @@ export const HospitalAdminDashboard: React.FC<HospitalAdminDashboardProps> = ({
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight">{data.hospital.name}</h1>
           <p className="text-xs text-slate-300 mt-1">
             {data.hospital.city}, {data.hospital.state} • Logged in as{' '}
-            <strong className="text-teal-200">{adminUser.name}</strong> ({adminUser.email})
+            <strong className="text-teal-200">{adminUser?.name || adminName || 'Administrator'}</strong>
+            {adminUser?.email ? ` (${adminUser.email})` : ''}
           </p>
         </div>
 
@@ -198,9 +205,9 @@ export const HospitalAdminDashboard: React.FC<HospitalAdminDashboardProps> = ({
             <Copy className="w-3.5 h-3.5" />
             <span>{copiedUrl ? 'Copied URL!' : 'Copy Booking Link'}</span>
           </button>
-          {onOpenBookingPreview && (
+          {(onOpenBookingPreview || onNavigateToBooking) && (
             <button
-              onClick={() => onOpenBookingPreview(data.hospital.slug)}
+              onClick={() => (onOpenBookingPreview || onNavigateToBooking)?.(data.hospital.slug)}
               className="flex items-center space-x-1.5 px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl transition-all border border-white/20"
             >
               <ExternalLink className="w-3.5 h-3.5" />

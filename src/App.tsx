@@ -34,20 +34,48 @@ import { HospitalOnboardingWizard } from './components/HospitalOnboardingWizard.
 import { HospitalAdminDashboard } from './components/HospitalAdminDashboard.js';
 import { HospitalLoginModal } from './components/HospitalLoginModal.js';
 
+function parseLocation(): { tab: string; slug?: string; token?: string } {
+  if (typeof window === 'undefined') return { tab: 'saas-home' };
+  const path = window.location.pathname;
+  const searchParams = new URLSearchParams(window.location.search);
+
+  // 1. Direct hospital booking URL: /hospital/:slug
+  const hospMatch = path.match(/^\/hospital\/([^/?#]+)/);
+  if (hospMatch && hospMatch[1]) {
+    return { tab: 'hospital-booking', slug: decodeURIComponent(hospMatch[1]) };
+  }
+
+  // 2. Direct live tracking URL: /track or /track?id=...
+  if (path.startsWith('/track')) {
+    const id = searchParams.get('id') || searchParams.get('token') || undefined;
+    return { tab: 'track-appointment', token: id };
+  }
+
+  // 3. Direct admin URL
+  if (path === '/admin' || path === '/hospital-admin') {
+    return { tab: 'hospital-admin' };
+  }
+
+  // 4. Saved activeTab if loaded at root
+  const saved = localStorage.getItem('doctormate_active_tab');
+  const validTabs = [
+    'doctor-desk',
+    'reception-desk',
+    'parent-portal',
+    'hospital-admin',
+    'hospital-booking',
+    'track-appointment',
+  ];
+  if (saved && validTabs.includes(saved) && path === '/') {
+    return { tab: saved };
+  }
+
+  return { tab: 'saas-home' };
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>(() => {
-    const saved = localStorage.getItem('doctormate_active_tab');
-    return (
-      saved === 'doctor-desk' ||
-      saved === 'reception-desk' ||
-      saved === 'parent-portal' ||
-      saved === 'hospital-admin' ||
-      saved === 'hospital-booking' ||
-      saved === 'track-appointment'
-    )
-      ? saved
-      : 'saas-home';
-  });
+  const initialRoute = parseLocation();
+  const [activeTab, setActiveTab] = useState<string>(initialRoute.tab);
 
   const [parentUser, setParentUser] = useState<Parent | null>(null);
   const [parentToken, setParentToken] = useState<string | null>(() => {
@@ -82,8 +110,8 @@ export default function App() {
   });
 
   // Active hospital for public booking view
-  const [activeHospitalSlug, setActiveHospitalSlug] = useState<string>('apex-hospital');
-  const [trackingToken, setTrackingToken] = useState<string | undefined>(undefined);
+  const [activeHospitalSlug, setActiveHospitalSlug] = useState<string>(initialRoute.slug || 'apex-hospital');
+  const [trackingToken, setTrackingToken] = useState<string | undefined>(initialRoute.token);
   const [onboardingHospital, setOnboardingHospital] = useState<Hospital | null>(null);
 
   // Modals
@@ -121,7 +149,19 @@ export default function App() {
     activeScenario: null,
   });
 
-  // Synchronize activeTab in localStorage and update browser title
+  // Listen for browser Back/Forward popstate events
+  useEffect(() => {
+    const handlePopState = () => {
+      const route = parseLocation();
+      setActiveTab(route.tab);
+      if (route.slug) setActiveHospitalSlug(route.slug);
+      if (route.token) setTrackingToken(route.token);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Synchronize activeTab in localStorage, URL bar, and browser document title
   useEffect(() => {
     localStorage.setItem('doctormate_active_tab', activeTab);
     const titles: Record<string, string> = {
@@ -135,7 +175,35 @@ export default function App() {
       'doctor-desk': 'Doctor Consultation Console | Doctormate',
     };
     document.title = titles[activeTab] || 'Doctormate — Multi-Hospital Smart OPD Platform';
-  }, [activeTab]);
+
+    // Synchronize browser URL bar
+    let targetPath = '/';
+    if (activeTab === 'hospital-booking' && activeHospitalSlug) {
+      targetPath = `/hospital/${encodeURIComponent(activeHospitalSlug)}`;
+    } else if (activeTab === 'track-appointment') {
+      targetPath = trackingToken ? `/track?id=${encodeURIComponent(trackingToken)}` : '/track';
+    } else if (activeTab === 'hospital-admin') {
+      targetPath = '/admin';
+    } else if (activeTab === 'reception-desk') {
+      targetPath = '/reception';
+    } else if (activeTab === 'doctor-desk') {
+      targetPath = '/doctor';
+    } else if (activeTab === 'parent-portal') {
+      targetPath = '/portal';
+    }
+
+    const currentFull = window.location.pathname + (window.location.search || '');
+    if (currentFull !== targetPath) {
+      window.history.pushState(null, '', targetPath);
+    }
+  }, [activeTab, activeHospitalSlug, trackingToken]);
+
+  // Auto-open login modal when accessing admin tab without active session
+  useEffect(() => {
+    if (activeTab === 'hospital-admin' && !hospitalAdmin) {
+      setIsHospitalLoginOpen(true);
+    }
+  }, [activeTab, hospitalAdmin]);
 
   // Initial data loading
   useEffect(() => {
@@ -367,7 +435,7 @@ export default function App() {
     setParentUser(parent);
     if (token) {
       setParentToken(token);
-      localStorage.setItem('sri_devi_parent_token', token);
+      localStorage.setItem('doctormate_parent_token', token);
     }
     setActiveTab('parent-portal');
   };
@@ -399,7 +467,7 @@ export default function App() {
 
   const handleLogoutReception = () => {
     localStorage.removeItem('doctormate_reception_user');
-    localStorage.removeItem('sri_devi_active_tab');
+    localStorage.removeItem('doctormate_active_tab');
     setReceptionUser(null);
     setActiveTab('saas-home');
   };
@@ -413,8 +481,8 @@ export default function App() {
         });
       } catch (err) {}
     }
-    localStorage.removeItem('sri_devi_parent_token');
-    localStorage.removeItem('sri_devi_active_tab');
+    localStorage.removeItem('doctormate_parent_token');
+    localStorage.removeItem('doctormate_active_tab');
     setParentToken(null);
     setParentUser(null);
     setActiveTab('saas-home');
@@ -580,6 +648,7 @@ export default function App() {
           hospitalAdmin ? (
             <HospitalAdminDashboard
               hospitalId={hospitalAdmin.hospital.id}
+              adminUser={hospitalAdmin.admin}
               adminName={hospitalAdmin.admin.name}
               onLogout={handleLogoutAdmin}
               onNavigateToBooking={(slug) => {
@@ -605,10 +674,42 @@ export default function App() {
         ) : activeTab === 'onboarding' && onboardingHospital ? (
           <HospitalOnboardingWizard
             hospital={onboardingHospital}
+            onFinish={(updatedHosp) => {
+              const updatedAdmin: HospitalAdminUser = (hospitalAdmin && hospitalAdmin.admin) || {
+                id: `admin_${updatedHosp.id}`,
+                hospitalId: updatedHosp.id,
+                name: updatedHosp.adminName,
+                email: updatedHosp.adminEmail,
+                mobile: updatedHosp.adminMobile,
+                role: 'HOSPITAL_ADMIN',
+                createdAt: new Date().toISOString(),
+              };
+              const session = {
+                admin: updatedAdmin,
+                hospital: updatedHosp,
+                token: hospitalAdmin?.token || `hosp_admin_tok_${Date.now()}`,
+              };
+              setHospitalAdmin(session);
+              localStorage.setItem('doctormate_admin_session', JSON.stringify(session));
+              setActiveTab('hospital-admin');
+            }}
             onCompleted={(updatedHosp) => {
-              if (hospitalAdmin) {
-                setHospitalAdmin({ ...hospitalAdmin, hospital: updatedHosp });
-              }
+              const updatedAdmin: HospitalAdminUser = (hospitalAdmin && hospitalAdmin.admin) || {
+                id: `admin_${updatedHosp.id}`,
+                hospitalId: updatedHosp.id,
+                name: updatedHosp.adminName,
+                email: updatedHosp.adminEmail,
+                mobile: updatedHosp.adminMobile,
+                role: 'HOSPITAL_ADMIN',
+                createdAt: new Date().toISOString(),
+              };
+              const session = {
+                admin: updatedAdmin,
+                hospital: updatedHosp,
+                token: hospitalAdmin?.token || `hosp_admin_tok_${Date.now()}`,
+              };
+              setHospitalAdmin(session);
+              localStorage.setItem('doctormate_admin_session', JSON.stringify(session));
               setActiveTab('hospital-admin');
             }}
             onCancel={() => setActiveTab('hospital-admin')}

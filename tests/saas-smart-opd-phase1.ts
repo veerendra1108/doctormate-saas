@@ -291,6 +291,71 @@ async function runTestSuite() {
     assert(typeof trackData.positionInQueue === 'number', 'Queue position calculated');
     assert(trackData.hospitalName === 'Apollo Apex Hospital', 'Correct hospital details returned in tracker');
 
+    // ------------------------------------------------------------------------
+    // TEST 8: QA Round 2 Regression Tests (DM-R2-001 through DM-R2-004)
+    // ------------------------------------------------------------------------
+    console.log('\n--- Step 8: QA Round 2 Regression Tests (DM-R2-001 through DM-R2-004) ---');
+
+    // DM-R2-001: 3-digit mobile number rejection
+    const invalidMobileRes = await fetch(`${baseUrl}/hospitals/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'QA Nimbus Test Hospital',
+        address: '17 Test Lane',
+        city: 'QA City',
+        adminName: 'Nimbus Admin',
+        adminEmail: `nimbus_${Date.now()}@example.com`,
+        adminMobile: '123', // INVALID 3-DIGIT
+        password: 'AdminPassword@123',
+      }),
+    });
+    assert(invalidMobileRes.status === 400, 'DM-R2-001: 3-digit admin mobile number is rejected with 400 Bad Request');
+    const invalidMobileData = await invalidMobileRes.json();
+    assert(invalidMobileData.error.includes('10-digit'), 'DM-R2-001: Clear field error message for invalid mobile');
+
+    // DM-R2-002 & DM-R2-004: Activation and newly registered admin dashboard access
+    const regAuroraRes = await fetch(`${baseUrl}/hospitals/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'QA Aurora Test Hospital',
+        address: '18 Test Lane',
+        city: 'Visakhapatnam',
+        adminName: 'Dr. QA Aurora Synthetic',
+        adminEmail: `aurora_${Date.now()}@example.com`,
+        adminMobile: '9000000172',
+        password: 'AuroraPassword@123',
+      }),
+    });
+    const regAuroraData = await regAuroraRes.json();
+    assert(regAuroraRes.ok && !!regAuroraData.hospital?.id, 'Aurora test hospital registered');
+    const auroraId = regAuroraData.hospital.id;
+    const auroraSlug = regAuroraData.hospital.slug;
+
+    // Activate Aurora
+    const activateRes = await fetch(`${baseUrl}/hospitals/${auroraId}/onboarding`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        step: 6,
+        activate: true,
+      }),
+    });
+    const activateData = await activateRes.json();
+    assert(activateRes.ok && activateData.hospital?.status === 'ACTIVE', 'DM-R2-002: Onboarding activation marks hospital ACTIVE');
+
+    // DM-R2-003: Public booking route resolves by slug
+    const publicHospRes = await fetch(`${baseUrl}/hospitals/${auroraSlug}`);
+    const publicHospData = await publicHospRes.json();
+    assert(publicHospRes.ok && publicHospData.hospital?.name === 'QA Aurora Test Hospital', 'DM-R2-003: Public hospital booking payload resolves by slug');
+
+    // DM-R2-004: Newly registered hospital admin dashboard data loads with complete stats
+    const auroraDashboardRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/dashboard`);
+    const auroraDashboardData = await auroraDashboardRes.json();
+    assert(auroraDashboardRes.ok && !!auroraDashboardData.hospital?.name, 'DM-R2-004: Admin dashboard payload successfully resolves without crash');
+    assert(typeof auroraDashboardData.stats?.totalDoctors === 'number', 'DM-R2-004: Stats totalDoctors calculated');
+    assert(Array.isArray(auroraDashboardData.todayAppointments), 'DM-R2-004: Today appointments array returned');
   } catch (err) {
     console.error('Test execution failed with error:', err);
     failed++;

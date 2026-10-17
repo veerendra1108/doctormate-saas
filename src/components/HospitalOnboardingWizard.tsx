@@ -20,13 +20,15 @@ import { Hospital, Doctor } from '../types/index.js';
 
 interface HospitalOnboardingWizardProps {
   hospital: Hospital;
-  onFinish: (activatedHospital: Hospital) => void;
+  onFinish?: (activatedHospital: Hospital) => void;
+  onCompleted?: (activatedHospital: Hospital) => void;
   onCancel?: () => void;
 }
 
 export const HospitalOnboardingWizard: React.FC<HospitalOnboardingWizardProps> = ({
   hospital,
   onFinish,
+  onCompleted,
   onCancel,
 }) => {
   const [currentStep, setCurrentStep] = useState(1);
@@ -169,7 +171,11 @@ export const HospitalOnboardingWizard: React.FC<HospitalOnboardingWizardProps> =
       }
 
       if (isActivation) {
-        onFinish(data.hospital);
+        if (typeof onFinish === 'function') {
+          onFinish(data.hospital);
+        } else if (typeof onCompleted === 'function') {
+          onCompleted(data.hospital);
+        }
       } else {
         setCurrentStep((prev) => prev + 1);
       }
