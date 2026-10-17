@@ -248,58 +248,85 @@ export class SchedulingService {
    */
   public getAvailableSlots(doctorId: string, branchId: BranchId, dateStr: string): SlotAvailability[] {
     const state = db.getState();
-    const dateObj = new Date(dateStr);
-    const dayOfWeek = dateObj.getDay(); // 0-6
+    const parts = dateStr.split('-').map(Number);
+    const dayOfWeek = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2]).getDay() : new Date(dateStr).getDay();
 
-    // Find schedule
-    const schedule = state.schedules.find(
-      (s) => s.doctorId === doctorId && s.branchId === branchId && s.daysOfWeek.includes(dayOfWeek) && s.isAvailable
+    const doctorObj = state.doctors.find((d) => d.id === doctorId);
+
+    // Find schedule - match by doctorId and branchId if provided, or fallback to doctor's schedule
+    let schedule = state.schedules.find(
+      (s) => s.doctorId === doctorId && (s.branchId === branchId || !branchId) && s.daysOfWeek.includes(dayOfWeek) && s.isAvailable
+    ) || state.schedules.find(
+      (s) => s.doctorId === doctorId && s.daysOfWeek.includes(dayOfWeek) && s.isAvailable
+    ) || state.schedules.find(
+      (s) => s.doctorId === doctorId && s.isAvailable
     );
 
     if (!schedule) {
-      return [];
+      if (!doctorObj) return [];
+      schedule = {
+        id: `sch_${doctorId}`,
+        hospitalId: doctorObj.hospitalId,
+        doctorId: doctorId,
+        branchId: branchId || doctorObj.branches[0] || 'main',
+        daysOfWeek: doctorObj.availableDays || [0, 1, 2, 3, 4, 5, 6],
+        startTime: '09:00',
+        endTime: '17:00',
+        slotDurationMinutes: doctorObj.slotDurationMinutes || 15,
+        bufferMinutesPerHour: 10,
+        isAvailable: true,
+      };
     }
 
-    const startMinutes = timeToMinutes(schedule.startTime);
-    const endMinutes = timeToMinutes(schedule.endTime);
-    const doctorObj = state.doctors.find((d) => d.id === doctorId);
-    const slotDuration = schedule.slotDurationMinutes || doctorObj?.slotDurationMinutes || 15;
+    // Authoritative slot duration from doctor profile
+    const slotDuration = doctorObj?.slotDurationMinutes || schedule.slotDurationMinutes || 15;
+    schedule.slotDurationMinutes = slotDuration;
+
+    const startMinutes = timeToMinutes(schedule.startTime || '09:00');
+    const endMinutes = timeToMinutes(schedule.endTime || '17:00');
+    const bufferMinutes = schedule.bufferMinutesPerHour !== undefined ? schedule.bufferMinutesPerHour : 10;
 
     // Existing active bookings for this date and doctor
     const existingBookings = state.appointments.filter(
       (a) =>
         a.doctorId === doctorId &&
-        a.branchId === branchId &&
         a.date === dateStr &&
         a.status !== 'RESCHEDULED' &&
         a.status !== 'SLOT_RELEASED' &&
         a.status !== 'HOSPITAL_CANCELLED'
     );
 
-    const bookedTimes = new Set(existingBookings.map((a) => a.bookedTime));
-
     const slots: SlotAvailability[] = [];
     let current = startMinutes;
     let slotIndex = 0;
+    const slotsPerHour = Math.max(1, Math.floor(60 / slotDuration));
 
     while (current + slotDuration <= endMinutes) {
       const timeStr = minutesToTime(current);
-      // Every 4th slot can be designated as internal protected buffer (10 mins per hour equivalent)
-      const isBuffer = slotIndex % 4 === 3;
+      const slotEndMin = current + slotDuration;
 
-      if (isBuffer) {
-        // Internal buffer slot - not shown as normal parent-bookable slot
+      // Check if this candidate slot overlaps with ANY existing active appointment
+      const overlappingAppt = existingBookings.find((a) => {
+        const apptStart = timeToMinutes(a.bookedTime);
+        const apptEnd = apptStart + slotDuration;
+        return Math.max(current, apptStart) < Math.min(slotEndMin, apptEnd);
+      });
+
+      // Buffer slot allocation: only if bufferMinutes > 0 and no appointment booked
+      const isBuffer = bufferMinutes > 0 && !overlappingAppt && (slotIndex % slotsPerHour === slotsPerHour - 1);
+
+      if (overlappingAppt) {
+        slots.push({
+          time: timeStr,
+          available: false,
+          status: 'Booked',
+        });
+      } else if (isBuffer) {
         slots.push({
           time: timeStr,
           available: false,
           status: 'Buffer',
           isBufferSlot: true,
-        });
-      } else if (bookedTimes.has(timeStr)) {
-        slots.push({
-          time: timeStr,
-          available: false,
-          status: 'Booked',
         });
       } else {
         slots.push({

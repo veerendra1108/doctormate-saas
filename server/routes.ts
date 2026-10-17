@@ -732,18 +732,16 @@ apiRouter.get('/reception/dashboard', (req, res) => {
 
 // --- MANDATORY TELEPHONE APPOINTMENT BOOKING ---
 apiRouter.post('/reception/phone-booking', (req, res) => {
-  const {
-    hospitalId,
-    patientName,
-    mobileNumber,
-    patientAge,
-    guardianName,
-    doctorId,
-    branchId,
-    date,
-    bookedTime,
-    bookingSource,
-  } = req.body;
+  const hospitalId = req.body.hospitalId;
+  const patientName = req.body.patientName;
+  const mobileNumber = req.body.mobileNumber || req.body.patientMobile;
+  const patientAge = req.body.patientAge || req.body.age;
+  const guardianName = req.body.guardianName;
+  const doctorId = req.body.doctorId;
+  const branchId = req.body.branchId;
+  const date = req.body.date || req.body.bookedDate;
+  const bookedTime = req.body.bookedTime;
+  const bookingSource = req.body.bookingSource || req.body.source || 'PHONE';
 
   if (!patientName || !mobileNumber || !doctorId || !date || !bookedTime) {
     return res.status(400).json({
@@ -763,18 +761,26 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
   const targetBranchId = branchId || doctor.branches[0] || 'main';
   const branch = state.branches.find((b) => b.id === targetBranchId);
 
-  // Check double-booking for the slot
-  const isSlotBooked = state.appointments.some(
-    (a) =>
-      (a.hospitalId || 'hosp_sdch') === targetHospitalId &&
-      a.doctorId === doctorId &&
-      a.date === date &&
-      a.bookedTime === bookedTime &&
-      !['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)
-  );
+  // Check double-booking and slot overlap based on doctor's consultation duration
+  const slotDuration = doctor.slotDurationMinutes || 15;
+  const requestedStart = timeToMinutes(bookedTime);
+  const requestedEnd = requestedStart + slotDuration;
 
-  if (isSlotBooked) {
-    return res.status(409).json({ error: 'This appointment slot is already booked. Please select another slot.' });
+  const overlappingAppt = state.appointments.find((a) => {
+    if ((a.hospitalId || 'hosp_sdch') !== targetHospitalId) return false;
+    if (a.doctorId !== doctorId || a.date !== date) return false;
+    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)) return false;
+
+    const existingStart = timeToMinutes(a.bookedTime);
+    const existingEnd = existingStart + slotDuration;
+
+    return Math.max(requestedStart, existingStart) < Math.min(requestedEnd, existingEnd);
+  });
+
+  if (overlappingAppt) {
+    return res.status(409).json({
+      error: `This appointment slot (${bookedTime}) overlaps with an existing consultation (${overlappingAppt.bookedTime} - ${minutesToTime(timeToMinutes(overlappingAppt.bookedTime) + slotDuration)}). Please select another slot.`,
+    });
   }
 
   // Generate structured unique token number
@@ -789,6 +795,8 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
   const apptId = `apt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const trackingSecret = Math.random().toString(36).substring(2, 10);
   const now = new Date().toISOString();
+
+  const validBookingSource = bookingSource === 'WALK_IN' ? 'WALK_IN' : (bookingSource === 'OTHER' ? 'OTHER' : 'PHONE');
 
   // Create appointment
   const newAppointment: Appointment = {
@@ -814,7 +822,7 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
     recommendedArrivalTime: minutesToTime(Math.max(0, timeToMinutes(bookedTime) - 15)),
     status: 'BOOKED',
     paymentStatus: 'PENDING',
-    bookingSource: (bookingSource === 'WALK_IN' ? 'WALK_IN' : 'PHONE') as any,
+    bookingSource: validBookingSource as any,
     advanceNoticePreferenceMinutes: 30,
     history: [
       {
@@ -834,7 +842,11 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
 
   db.persistState();
 
-  const trackerUrl = `/track?id=${encodeURIComponent(appointmentNumber)}&mobile=${encodeURIComponent(mobileNumber)}`;
+  const host = req.get('host') || 'localhost:3000';
+  const protocol = req.protocol || 'http';
+  const origin = req.get('origin') || `${protocol}://${host}`;
+  const relativeTrackerUrl = `/track?id=${encodeURIComponent(appointmentNumber)}&mobile=${encodeURIComponent(mobileNumber)}`;
+  const trackerUrl = `${origin}${relativeTrackerUrl}`;
   const confirmationText = `Doctormate Appointment Confirmed!\nHospital: ${newAppointment.hospitalName}\nDoctor: ${doctor.name}\nToken: ${appointmentNumber}\nDate: ${date}\nTime: ${bookedTime}\nPatient: ${patientName}\nLive Queue Tracking: ${trackerUrl}`;
 
   return res.json({
@@ -842,6 +854,7 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
     appointment: newAppointment,
     token: appointmentNumber,
     trackerUrl,
+    relativeTrackerUrl,
     confirmationText,
   });
 });
@@ -878,18 +891,26 @@ apiRouter.post('/appointments/online-book', (req, res) => {
   const targetBranchId = branchId || doctor.branches[0] || 'main';
   const branch = state.branches.find((b) => b.id === targetBranchId);
 
-  // Prevent double-booking
-  const isSlotBooked = state.appointments.some(
-    (a) =>
-      (a.hospitalId || 'hosp_sdch') === targetHospitalId &&
-      a.doctorId === doctorId &&
-      a.date === date &&
-      a.bookedTime === bookedTime &&
-      !['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)
-  );
+  // Prevent double-booking and slot overlap based on doctor's consultation duration
+  const slotDuration = doctor.slotDurationMinutes || 15;
+  const requestedStart = timeToMinutes(bookedTime);
+  const requestedEnd = requestedStart + slotDuration;
 
-  if (isSlotBooked) {
-    return res.status(409).json({ error: 'Slot already taken. Please choose another available slot.' });
+  const overlappingAppt = state.appointments.find((a) => {
+    if ((a.hospitalId || 'hosp_sdch') !== targetHospitalId) return false;
+    if (a.doctorId !== doctorId || a.date !== date) return false;
+    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)) return false;
+
+    const existingStart = timeToMinutes(a.bookedTime);
+    const existingEnd = existingStart + slotDuration;
+
+    return Math.max(requestedStart, existingStart) < Math.min(requestedEnd, existingEnd);
+  });
+
+  if (overlappingAppt) {
+    return res.status(409).json({
+      error: `This appointment slot (${bookedTime}) overlaps with an existing consultation (${overlappingAppt.bookedTime}). Please choose another available slot.`,
+    });
   }
 
   const hospPrefix = hospital?.slug ? hospital.slug.substring(0, 4).toUpperCase() : 'HOSP';
@@ -944,7 +965,10 @@ apiRouter.post('/appointments/online-book', (req, res) => {
   schedulingService.recalculateSessionQueue(doctorId, targetBranchId, date);
   db.persistState();
 
-  const trackerUrl = `/track?id=${encodeURIComponent(appointmentNumber)}&mobile=${encodeURIComponent(mobileNumber)}`;
+  const host = req.get('host') || 'localhost:3000';
+  const protocol = req.protocol || 'http';
+  const origin = req.get('origin') || `${protocol}://${host}`;
+  const trackerUrl = `${origin}/track?id=${encodeURIComponent(appointmentNumber)}&mobile=${encodeURIComponent(mobileNumber)}`;
 
   res.json({
     success: true,
@@ -1229,13 +1253,16 @@ apiRouter.get('/doctors/:id/schedules', (req, res) => {
 // Available slots for doctor on date and branch
 apiRouter.get('/slots', (req, res) => {
   const { doctorId, branchId, date } = req.query;
-  if (!doctorId || !branchId || !date) {
-    return res.status(400).json({ error: 'doctorId, branchId, and date query params are required' });
+  if (!doctorId || !date) {
+    return res.status(400).json({ error: 'doctorId and date query params are required' });
   }
+
+  const doctor = db.getState().doctors.find((d) => d.id === doctorId);
+  const effectiveBranchId = (branchId ? String(branchId) : (doctor?.branches?.[0] || 'main')) as BranchId;
 
   const slots = schedulingService.getAvailableSlots(
     String(doctorId),
-    String(branchId) as BranchId,
+    effectiveBranchId,
     String(date)
   );
 

@@ -177,14 +177,27 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
         throw new Error(data.error || 'Failed to confirm booking.');
       }
 
+      const origin = window.location.origin;
+      const fullTrackerUrl = data.trackerUrl?.startsWith('http')
+        ? data.trackerUrl
+        : `${origin}${data.trackerUrl?.startsWith('/') ? '' : '/'}${data.trackerUrl}`;
+
+      let fullConfirmationText = data.confirmationText || '';
+      if (!fullConfirmationText.includes('http://') && !fullConfirmationText.includes('https://')) {
+        fullConfirmationText = fullConfirmationText.replace(
+          /(Live Queue Tracking:\s*)(\/[^\s]+)/,
+          `$1${origin}$2`
+        );
+      }
+
       setConfirmedBooking({
         appointmentNumber: data.token,
         patientName: patientName.trim(),
         doctorName: doctor?.name || 'Assigned Doctor',
         bookedTime: selectedSlot,
         date,
-        trackerUrl: data.trackerUrl,
-        confirmationText: data.confirmationText,
+        trackerUrl: fullTrackerUrl,
+        confirmationText: fullConfirmationText,
       });
 
       onBookingSuccess();
@@ -197,7 +210,15 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
 
   const handleCopyConfirmation = () => {
     if (confirmedBooking?.confirmationText) {
-      navigator.clipboard.writeText(confirmedBooking.confirmationText);
+      const origin = window.location.origin;
+      let textToCopy = confirmedBooking.confirmationText;
+      if (!textToCopy.includes('http://') && !textToCopy.includes('https://')) {
+        textToCopy = textToCopy.replace(
+          /(Live Queue Tracking:\s*)(\/[^\s]+)/,
+          `$1${origin}$2`
+        );
+      }
+      navigator.clipboard.writeText(textToCopy);
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     }

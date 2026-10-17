@@ -427,11 +427,12 @@ async function runTestSuite() {
     assert(updatedDocInDash.schedule?.bufferMinutesPerHour === 10, 'DM-R3-002: Admin dashboard provides buffer/break time');
 
     // DM-R3-003: Receptionist tenant isolation & hospital scope
+    const recUsername = `qa.aurora.desk.${Date.now()}`;
     const addRecRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/receptionists`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username: 'qa.aurora.desk.test',
+        username: recUsername,
         password: 'Reception@123',
         name: 'QA Aurora Front Desk',
       }),
@@ -444,7 +445,7 @@ async function runTestSuite() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        username: 'qa.aurora.desk.test',
+        username: recUsername,
         password: 'Reception@123',
       }),
     });
@@ -464,6 +465,114 @@ async function runTestSuite() {
     const scopedBranches = await scopedBranchesRes.json();
     assert(scopedBranches.every((b: any) => b.hospitalId === auroraId), 'DM-R3-003: Zero branches from other hospitals exposed in Aurora scope');
     assert(!scopedBranches.some((b: any) => b.id === 'kakinada' || b.id === 'pithapuram'), 'DM-R3-003: Kakinada/Pithapuram excluded from Aurora scope');
+
+    // ------------------------------------------------------------------------
+    // STEP 9: QA Round 4 Regression Tests (DM-R4-001, DM-R4-002, DM-R4-003)
+    // ------------------------------------------------------------------------
+    console.log('\n--- Step 9: QA Round 4 Regression Tests (DM-R4-001 through DM-R4-003) ---');
+
+    // DM-R4-001: Doctor with 15-minute slot duration generates 15-minute slot intervals
+    // Create doctor with 15-min slot duration under Aurora
+    const doc15Res = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dr. QA 15Min Synthetic',
+        specialty: 'Pediatric Neurology',
+        slotDurationMinutes: 15,
+        consultationFee: 750,
+        startTime: '14:00',
+        endTime: '18:00',
+        availableDays: [1, 2, 3, 4, 5, 6, 7],
+        bufferMinutesPerHour: 0,
+      }),
+    });
+    const doc15Data = await doc15Res.json();
+    assert(doc15Res.ok && doc15Data.success, 'DM-R4-001: Created doctor with 15-minute slot duration');
+    const doc15Id = doc15Data.doctor.id;
+
+    // Fetch slots for 15-min doctor on simulated date (2026-10-18)
+    const r4TestDate = '2026-10-18';
+    const slots15Res = await fetch(`${baseUrl}/slots?doctorId=${doc15Id}&date=${r4TestDate}`);
+    const slots15Data = await slots15Res.json();
+    assert(Array.isArray(slots15Data) && slots15Data.length >= 2, 'DM-R4-001: 15-min doctor generated available slots');
+    const slot0Time = slots15Data[0]?.time;
+    const slot1Time = slots15Data[1]?.time;
+    // Calculate difference in minutes between first two slots
+    const [h0, m0] = slot0Time.split(':').map(Number);
+    const [h1, m1] = slot1Time.split(':').map(Number);
+    const diffMins = (h1 * 60 + m1) - (h0 * 60 + m0);
+    assert(diffMins === 15, `DM-R4-001: Slots step by exact 15-minute intervals (got ${diffMins} mins: ${slot0Time} -> ${slot1Time})`);
+
+    // DM-R4-001: Overlap prevention - Book 15:40 appointment
+    const bookAlphaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: doc15Id,
+        bookedDate: r4TestDate,
+        bookedTime: '15:40',
+        patientName: 'QA Phone Alpha',
+        patientMobile: '9000000411',
+        age: '6',
+        gender: 'Male',
+        source: 'PHONE',
+      }),
+    });
+    const bookAlphaData = await bookAlphaRes.json();
+    assert(bookAlphaRes.ok && bookAlphaData.success, 'DM-R4-001: First phone booking at 15:40 succeeds');
+
+    // DM-R4-001: Overlap prevention - Attempting to book 15:50 for same 15m doctor must be REJECTED (409 Conflict)
+    const bookBetaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: doc15Id,
+        bookedDate: r4TestDate,
+        bookedTime: '15:50',
+        patientName: 'QA Phone Beta',
+        patientMobile: '9000000412',
+        age: '8',
+        gender: 'Female',
+        source: 'PHONE',
+      }),
+    });
+    const bookBetaData = await bookBetaRes.json();
+    assert(bookBetaRes.status === 409 && !bookBetaData.success, 'DM-R4-001: Overlapping booking at 15:50 (within 15:40-15:55 slot) is rejected with 409 Conflict');
+
+    // DM-R4-001: Non-overlapping booking at 15:55 (after 15-minute slot) must succeed
+    const bookGammaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: doc15Id,
+        bookedDate: r4TestDate,
+        bookedTime: '15:55',
+        patientName: 'QA Phone Gamma',
+        patientMobile: '9000000413',
+        age: '5',
+        gender: 'Female',
+        source: 'PHONE',
+      }),
+    });
+    const bookGammaData = await bookGammaRes.json();
+    assert(bookGammaRes.ok && bookGammaData.success, 'DM-R4-001: Non-overlapping booking at 15:55 succeeds');
+
+    // DM-R4-003: Copied tracker details must contain full origin URL
+    assert(bookAlphaData.trackerUrl && bookAlphaData.trackerUrl.startsWith('http://localhost:4199/track?id='), `DM-R4-003: Phone booking returns full tracker URL with public origin: ${bookAlphaData.trackerUrl}`);
+    assert(bookAlphaData.confirmationText && bookAlphaData.confirmationText.includes('http://localhost:4199/track?id='), 'DM-R4-003: Confirmation text contains full tracker URL with public origin');
+
+    // DM-R4-002: Booking source persistence and filtering
+    const recQueueRes = await fetch(`${baseUrl}/reception/dashboard?hospitalId=${auroraId}&date=${r4TestDate}`);
+    const recQueueData = await recQueueRes.json();
+    const recAppointments = recQueueData.appointments || [];
+    assert(Array.isArray(recAppointments), 'DM-R4-002: Reception appointments returned as array');
+    const phoneAppts = recAppointments.filter((a: any) => a.bookingSource === 'PHONE' || a.source === 'PHONE');
+    assert(phoneAppts.length >= 2, `DM-R4-002: Phone bookings correctly persisted with PHONE source (found ${phoneAppts.length})`);
+
   } catch (err) {
     console.error('Test execution failed with error:', err);
     failed++;

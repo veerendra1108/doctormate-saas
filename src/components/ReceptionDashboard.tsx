@@ -36,8 +36,9 @@ import {
   Unlock,
   FileText,
   CheckCircle2,
-  Phone,
   Edit2,
+  Globe,
+  Phone,
 } from 'lucide-react';
 import { VaccineRemindersDesk } from './VaccineRemindersDesk.js';
 import { RegisterVaccineModal } from './RegisterVaccineModal.js';
@@ -85,6 +86,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('all');
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>(config.simulatedDate);
   const [isAllDates, setIsAllDates] = useState<boolean>(false);
+  const [selectedSourceFilter, setSelectedSourceFilter] = useState<'ALL' | 'PHONE' | 'ONLINE' | 'WALK_IN' | 'OTHER'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [queueData, setQueueData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -692,7 +694,35 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   tomorrowDate.setDate(tomorrowDate.getDate() + 1);
   const tomorrowDateStr = tomorrowDate.toLocaleDateString('en-CA');
 
+  // Dynamic booking source counts
+  const sourceCounts = useMemo(() => {
+    const counts = { ALL: appointments.length, PHONE: 0, ONLINE: 0, WALK_IN: 0, OTHER: 0 };
+    appointments.forEach((a) => {
+      const src = (a.bookingSource || 'ONLINE').toUpperCase();
+      if (src === 'PHONE' || src === 'RECEPTION_PHONE') counts.PHONE++;
+      else if (src === 'ONLINE') counts.ONLINE++;
+      else if (src === 'WALK_IN') counts.WALK_IN++;
+      else counts.OTHER++;
+    });
+    return counts;
+  }, [appointments]);
+
   const filteredAppointments = appointments.filter((appt) => {
+    // Booking Source Filter
+    if (selectedSourceFilter !== 'ALL') {
+      const src = (appt.bookingSource || 'ONLINE').toUpperCase();
+      if (selectedSourceFilter === 'PHONE') {
+        if (src !== 'PHONE' && src !== 'RECEPTION_PHONE') return false;
+      } else if (selectedSourceFilter === 'ONLINE') {
+        if (src !== 'ONLINE') return false;
+      } else if (selectedSourceFilter === 'WALK_IN') {
+        if (src !== 'WALK_IN') return false;
+      } else if (selectedSourceFilter === 'OTHER') {
+        if (src !== 'OTHER' && src !== 'STAFF_ASSISTED') return false;
+      }
+    }
+
+    // Search query filter
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase().trim();
     return (
@@ -1204,6 +1234,107 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 <X className="w-3.5 h-3.5" />
               </button>
             )}
+          </div>
+
+          {/* Booking Source Filter Buttons (DM-R4-002) */}
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+            <span className="text-xs font-bold text-slate-500 mr-1 flex items-center gap-1">
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Channel:</span>
+            </span>
+            <button
+              id="rec-source-filter-all"
+              type="button"
+              onClick={() => setSelectedSourceFilter('ALL')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                selectedSourceFilter === 'ALL'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              <span>All Sources</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                selectedSourceFilter === 'ALL' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {sourceCounts.ALL}
+              </span>
+            </button>
+
+            <button
+              id="rec-source-filter-phone"
+              type="button"
+              onClick={() => setSelectedSourceFilter('PHONE')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                selectedSourceFilter === 'PHONE'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              <Phone className="w-3 h-3" />
+              <span>Phone</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                selectedSourceFilter === 'PHONE' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {sourceCounts.PHONE}
+              </span>
+            </button>
+
+            <button
+              id="rec-source-filter-online"
+              type="button"
+              onClick={() => setSelectedSourceFilter('ONLINE')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                selectedSourceFilter === 'ONLINE'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              <Globe className="w-3 h-3" />
+              <span>Online</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                selectedSourceFilter === 'ONLINE' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {sourceCounts.ONLINE}
+              </span>
+            </button>
+
+            <button
+              id="rec-source-filter-walk-in"
+              type="button"
+              onClick={() => setSelectedSourceFilter('WALK_IN')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                selectedSourceFilter === 'WALK_IN'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              <User className="w-3 h-3" />
+              <span>Walk-In</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                selectedSourceFilter === 'WALK_IN' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {sourceCounts.WALK_IN}
+              </span>
+            </button>
+
+            <button
+              id="rec-source-filter-other"
+              type="button"
+              onClick={() => setSelectedSourceFilter('OTHER')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                selectedSourceFilter === 'OTHER'
+                  ? 'bg-teal-700 text-white shadow-xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              <Building className="w-3 h-3" />
+              <span>Staff Assisted</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                selectedSourceFilter === 'OTHER' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+              }`}>
+                {sourceCounts.OTHER}
+              </span>
+            </button>
           </div>
         </div>
 
