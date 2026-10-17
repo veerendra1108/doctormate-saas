@@ -1,4 +1,6 @@
 import {
+  Hospital,
+  HospitalAdminUser,
   Parent,
   Child,
   Doctor,
@@ -35,14 +37,20 @@ import {
 } from './demoSeedData.js';
 
 export interface DatabaseState {
+  hospitals: Hospital[];
+  hospitalAdmins: HospitalAdminUser[];
+  hospitalAdminPasswords: Record<string, string>;
+  hospitalAdminSessionsAuth: { token: string; hospitalId: string; adminId: string; expiresAt: string }[];
   parents: Parent[];
   parentPasswords: Record<string, string>; // mobile -> password
   parentSessionsAuth: { token: string; parentId: string; expiresAt: string }[];
   receptionUsers: {
     username: string;
     password: string;
-    branchId: 'kakinada' | 'pithapuram';
+    branchId: string;
     name: string;
+    hospitalId?: string;
+    assignedDoctorIds?: string[];
   }[];
   doctors: Doctor[];
   doctorAccounts: DoctorAccount[];
@@ -179,24 +187,110 @@ export function getInitialSeedData(): DatabaseState {
     '9000000010': 'Test@123',
   };
 
+  const hospitals: Hospital[] = [
+    {
+      id: 'hosp_sdch',
+      slug: 'apex-hospital',
+      name: 'Apex Multi-Specialty Hospital',
+      address: '77 Healthcare Boulevard, Beach Road',
+      city: 'Visakhapatnam',
+      state: 'Andhra Pradesh',
+      pincode: '530002',
+      phone: '+91 891 223 4455',
+      adminName: 'Dr. Vivek Sharma',
+      adminEmail: 'admin@apexhealth.com',
+      adminMobile: '9888877777',
+      hospitalType: 'Super Speciality Hospital & Trauma Center',
+      logoUrl: '/logos/apex-health.png',
+      status: 'ACTIVE',
+      onboardingStep: 6,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    },
+    {
+      id: 'hosp_citycare',
+      slug: 'city-care',
+      name: 'City Care Multi-Speciality Hospital',
+      address: 'Road No. 12, Banjara Hills',
+      city: 'Hyderabad',
+      state: 'Telangana',
+      pincode: '500034',
+      phone: '+91 40 2345 6789',
+      adminName: 'Dr. Rajesh Varma',
+      adminEmail: 'admin@citycarehospital.com',
+      adminMobile: '9848012345',
+      hospitalType: 'Multispeciality Hospital & Research Center',
+      logoUrl: '/logos/city-care.png',
+      status: 'ACTIVE',
+      onboardingStep: 6,
+      createdAt: '2026-01-15T00:00:00Z',
+      updatedAt: '2026-01-15T00:00:00Z',
+    },
+  ];
+
+  const hospitalAdmins: HospitalAdminUser[] = [
+    {
+      id: 'admin_sdch',
+      hospitalId: 'hosp_sdch',
+      name: 'Dr. Vivek Sharma',
+      email: 'admin@apexhealth.com',
+      mobile: '9888877777',
+      role: 'HOSPITAL_ADMIN',
+      createdAt: '2026-01-01T00:00:00Z',
+    },
+    {
+      id: 'admin_citycare',
+      hospitalId: 'hosp_citycare',
+      name: 'Dr. Rajesh Varma',
+      email: 'admin@citycarehospital.com',
+      mobile: '9848012345',
+      role: 'HOSPITAL_ADMIN',
+      createdAt: '2026-01-15T00:00:00Z',
+    },
+  ];
+
+  const hospitalAdminPasswords: Record<string, string> = {
+    'admin@apexhealth.com': 'Admin@123',
+    'admin@citycarehospital.com': 'Admin@123',
+  };
+
   const receptionUsers = [
+    {
+      username: 'reception.apex',
+      password: 'Reception@123',
+      branchId: 'kakinada',
+      name: 'Apex Hospital Frontdesk',
+      hospitalId: 'hosp_sdch',
+      assignedDoctorIds: ['dr-subba-rao', 'dr-prashant', 'dr-ramesh-kumar'],
+    },
     {
       username: 'reception.kakinada',
       password: 'Reception@123',
-      branchId: 'kakinada' as const,
-      name: 'Kakinada Frontdesk',
+      branchId: 'kakinada',
+      name: 'Apex Hospital Frontdesk',
+      hospitalId: 'hosp_sdch',
+      assignedDoctorIds: ['dr-subba-rao', 'dr-prashant'],
     },
     {
       username: 'reception.pithapuram',
       password: 'Reception@123',
-      branchId: 'pithapuram' as const,
+      branchId: 'pithapuram',
       name: 'Pithapuram Frontdesk',
+      hospitalId: 'hosp_sdch',
+    },
+    {
+      username: 'reception.citycare',
+      password: 'Reception@123',
+      branchId: 'citycare-banjara',
+      name: 'City Care Frontdesk',
+      hospitalId: 'hosp_citycare',
     },
   ];
 
   const doctors: Doctor[] = [
     {
       id: 'dr-subba-rao',
+      hospitalId: 'hosp_sdch',
       name: 'Dr. Subba Rao Vadarevu',
       photoUrl: 'https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&w=600&q=80',
       qualifications: 'MBBS, MD (Pediatrics), DCH',
@@ -208,11 +302,15 @@ export function getInitialSeedData(): DatabaseState {
       scheduleDescription: 'Daily consultation sessions from 10:00 AM to 07:00 PM across hospital branches.',
       medicalRegistrationNo: 'APMC-38492',
       mobile: '9440112233',
-      email: 'subbarao@drsridevichildren.com',
+      email: 'subbarao@apexhealth.com',
       digitalSignatureUrl: '/signatures/dr-subba-rao.png',
+      slotDurationMinutes: 15, // 15 min slots
+      availableDays: [0, 1, 2, 3, 4, 5, 6],
+      consultationFee: 500,
     },
     {
       id: 'dr-prashant',
+      hospitalId: 'hosp_sdch',
       name: 'Dr. Prashant',
       photoUrl: 'https://images.unsplash.com/photo-1537368910025-700350fe46c7?auto=format&fit=crop&w=600&q=80',
       qualifications: 'MBBS, MD (Pediatrics), DCH, FIAP',
@@ -224,17 +322,59 @@ export function getInitialSeedData(): DatabaseState {
       scheduleDescription: 'Daily consultation sessions from 10:00 AM to 07:00 PM across hospital branches.',
       medicalRegistrationNo: 'APMC-45120',
       mobile: '9440112244',
-      email: 'prashant@drsridevichildren.com',
+      email: 'prashant@apexhealth.com',
       digitalSignatureUrl: '/signatures/dr-prashant.png',
+      slotDurationMinutes: 15, // 15 min slots
+      availableDays: [0, 1, 2, 3, 4, 5, 6],
+      consultationFee: 500,
+    },
+    {
+      id: 'dr-ramesh-kumar',
+      hospitalId: 'hosp_citycare',
+      name: 'Dr. Ramesh Kumar',
+      photoUrl: 'https://images.unsplash.com/photo-1537368910025-700350fe46c7?auto=format&fit=crop&w=600&q=80',
+      qualifications: 'MBBS, MD (General Medicine)',
+      specialty: 'Senior Consultant Physician',
+      experienceYears: 18,
+      summary: 'Experienced physician specializing in general consultations, diabetic care, and acute adult & family healthcare.',
+      branches: ['citycare-banjara'],
+      active: true,
+      scheduleDescription: 'Mon to Sat 09:00 AM to 05:00 PM at Banjara Hills.',
+      medicalRegistrationNo: 'TSMC-58210',
+      mobile: '9848099881',
+      email: 'ramesh.kumar@citycarehospital.com',
+      slotDurationMinutes: 10, // 10 min slots per user requirement!
+      availableDays: [1, 2, 3, 4, 5, 6],
+      consultationFee: 600,
+    },
+    {
+      id: 'dr-ananya-sharma',
+      hospitalId: 'hosp_citycare',
+      name: 'Dr. Ananya Sharma',
+      photoUrl: 'https://images.unsplash.com/photo-1594824813637-438eb4d58852?auto=format&fit=crop&w=600&q=80',
+      qualifications: 'MBBS, MS (ENT), DNB',
+      specialty: 'ENT Specialist & Rapid Triage',
+      experienceYears: 12,
+      summary: 'Specialist in rapid ENT evaluations, endoscopic screenings, and pediatric ENT consultations.',
+      branches: ['citycare-banjara'],
+      active: true,
+      scheduleDescription: 'Mon to Fri 10:00 AM to 04:00 PM at Banjara Hills.',
+      medicalRegistrationNo: 'TSMC-69142',
+      mobile: '9848099882',
+      email: 'ananya.sharma@citycarehospital.com',
+      slotDurationMinutes: 5, // 5 min slots per user requirement!
+      availableDays: [1, 2, 3, 4, 5],
+      consultationFee: 500,
     },
   ];
 
   const doctorAccounts: DoctorAccount[] = [
     {
       id: 'dr-subba-rao',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-subba-rao',
       name: 'Dr. Subba Rao Vadarevu',
-      email: 'subbarao@drsridevichildren.com',
+      email: 'subbarao@apexhealth.com',
       mobile: '9440112233',
       medicalRegistrationNo: 'APMC-38492',
       digitalSignatureUrl: '/signatures/dr-subba-rao.png',
@@ -243,12 +383,35 @@ export function getInitialSeedData(): DatabaseState {
     },
     {
       id: 'dr-prashant',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-prashant',
       name: 'Dr. Prashant',
-      email: 'prashant@drsridevichildren.com',
+      email: 'prashant@apexhealth.com',
       mobile: '9440112244',
       medicalRegistrationNo: 'APMC-45120',
       digitalSignatureUrl: '/signatures/dr-prashant.png',
+      isApproved: true,
+      isActive: true,
+    },
+    {
+      id: 'dr-ramesh-kumar',
+      hospitalId: 'hosp_citycare',
+      doctorId: 'dr-ramesh-kumar',
+      name: 'Dr. Ramesh Kumar',
+      email: 'ramesh.kumar@citycarehospital.com',
+      mobile: '9848099881',
+      medicalRegistrationNo: 'TSMC-58210',
+      isApproved: true,
+      isActive: true,
+    },
+    {
+      id: 'dr-ananya-sharma',
+      hospitalId: 'hosp_citycare',
+      doctorId: 'dr-ananya-sharma',
+      name: 'Dr. Ananya Sharma',
+      email: 'ananya.sharma@citycarehospital.com',
+      mobile: '9848099882',
+      medicalRegistrationNo: 'TSMC-69142',
       isApproved: true,
       isActive: true,
     },
@@ -257,34 +420,50 @@ export function getInitialSeedData(): DatabaseState {
   const doctorPasswords: Record<string, string> = {
     'dr-subba-rao': 'Doctor@123',
     'dr-prashant': 'Doctor@123',
+    'dr-ramesh-kumar': 'Doctor@123',
+    'dr-ananya-sharma': 'Doctor@123',
   };
 
   const branches: HospitalBranch[] = [
     {
       id: 'kakinada',
-      name: 'Sri Devi Children Hospital - Kakinada',
-      address: 'Near Rama Rao Peta, Main Road, Kakinada, Andhra Pradesh 533004',
-      landmark: 'Near Government General Hospital / Medical College Junction',
-      phone: '+91 884 237 8899',
-      emergencyPhone: '+91 944 011 2233',
-      timings: 'Daily: 10:00 AM - 07:00 PM (Emergency 24/7)',
-      googleMapsUrl: 'https://maps.google.com/?q=Sri+Devi+Children+Hospital+Kakinada',
+      hospitalId: 'hosp_sdch',
+      name: 'Apex Multi-Specialty Hospital - Main Campus',
+      address: '77 Healthcare Boulevard, Beach Road, Visakhapatnam, Andhra Pradesh 530002',
+      landmark: 'Near Central Medical College Junction',
+      phone: '+91 891 223 4455',
+      emergencyPhone: '+91 988 887 7777',
+      timings: 'Daily: 09:00 AM - 08:00 PM (Emergency 24/7)',
+      googleMapsUrl: 'https://maps.google.com/?q=Apex+Hospital+Visakhapatnam',
     },
     {
       id: 'pithapuram',
-      name: 'Sri Devi Children Hospital - Pithapuram',
-      address: 'Station Road, Opp. Municipal Complex, Pithapuram, Andhra Pradesh 533450',
-      landmark: 'Near RTC Bus Complex & Temple Arch Road',
-      phone: '+91 8869 252 777',
-      emergencyPhone: '+91 944 011 2244',
-      timings: 'Daily: 10:00 AM - 07:00 PM (Emergency open)',
-      googleMapsUrl: 'https://maps.google.com/?q=Sri+Devi+Children+Hospital+Pithapuram',
+      hospitalId: 'hosp_sdch',
+      name: 'Apex Hospital - Downtown Branch',
+      address: 'Station Road, City Center, Visakhapatnam, Andhra Pradesh 530004',
+      landmark: 'Near RTC Bus Complex',
+      phone: '+91 891 223 4466',
+      emergencyPhone: '+91 988 887 7788',
+      timings: 'Daily: 09:00 AM - 07:00 PM (Emergency open)',
+      googleMapsUrl: 'https://maps.google.com/?q=Apex+Hospital+Downtown',
+    },
+    {
+      id: 'citycare-banjara',
+      hospitalId: 'hosp_citycare',
+      name: 'City Care Hospital - Banjara Hills',
+      address: 'Road No. 12, Opp. City Center, Banjara Hills, Hyderabad 500034',
+      landmark: 'Near Care Hospital Lane',
+      phone: '+91 40 2345 6789',
+      emergencyPhone: '+91 98480 12345',
+      timings: 'Mon-Sat: 09:00 AM - 08:00 PM (Emergency 24/7)',
+      googleMapsUrl: 'https://maps.google.com/?q=Banjara+Hills+Hyderabad',
     },
   ];
 
   const schedules: DoctorSchedule[] = [
     {
       id: 'sch-1',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-subba-rao',
       branchId: 'kakinada',
       daysOfWeek: [0, 1, 2, 3, 4, 5, 6], // Daily (Sun-Sat)
@@ -297,6 +476,7 @@ export function getInitialSeedData(): DatabaseState {
     },
     {
       id: 'sch-2',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-subba-rao',
       branchId: 'pithapuram',
       daysOfWeek: [0, 1, 2, 3, 4, 5, 6], // Daily (Sun-Sat)
@@ -309,6 +489,7 @@ export function getInitialSeedData(): DatabaseState {
     },
     {
       id: 'sch-3',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-prashant',
       branchId: 'kakinada',
       daysOfWeek: [0, 1, 2, 3, 4, 5, 6], // Daily (Sun-Sat)
@@ -321,6 +502,7 @@ export function getInitialSeedData(): DatabaseState {
     },
     {
       id: 'sch-4',
+      hospitalId: 'hosp_sdch',
       doctorId: 'dr-prashant',
       branchId: 'pithapuram',
       daysOfWeek: [0, 1, 2, 3, 4, 5, 6], // Daily (Sun-Sat)
@@ -330,6 +512,32 @@ export function getInitialSeedData(): DatabaseState {
       bufferMinutesPerHour: 10,
       isAvailable: true,
       notes: 'Daily consultation session in Pithapuram',
+    },
+    {
+      id: 'sch-citycare-1',
+      hospitalId: 'hosp_citycare',
+      doctorId: 'dr-ramesh-kumar',
+      branchId: 'citycare-banjara',
+      daysOfWeek: [1, 2, 3, 4, 5, 6], // Mon-Sat
+      startTime: '09:00',
+      endTime: '17:00',
+      slotDurationMinutes: 10, // 10 min slots
+      bufferMinutesPerHour: 10,
+      isAvailable: true,
+      notes: 'General Physician OPD Session',
+    },
+    {
+      id: 'sch-citycare-2',
+      hospitalId: 'hosp_citycare',
+      doctorId: 'dr-ananya-sharma',
+      branchId: 'citycare-banjara',
+      daysOfWeek: [1, 2, 3, 4, 5], // Mon-Fri
+      startTime: '10:00',
+      endTime: '16:00',
+      slotDurationMinutes: 5, // 5 min slots
+      bufferMinutesPerHour: 10,
+      isAvailable: true,
+      notes: 'ENT Rapid OPD Session',
     },
   ];
 
@@ -399,7 +607,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '10:00',
       expectedConsultationTime: '10:08',
@@ -434,7 +642,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '10:15',
       expectedConsultationTime: '10:23',
@@ -466,7 +674,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '10:30',
       expectedConsultationTime: '10:38',
@@ -498,7 +706,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '10:45',
       expectedConsultationTime: '10:52',
@@ -529,7 +737,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '11:00',
       expectedConsultationTime: '11:12', // Doctor running approx 12 mins late
@@ -560,7 +768,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '11:15',
       expectedConsultationTime: '11:27',
@@ -590,7 +798,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '11:30',
       expectedConsultationTime: '11:42',
@@ -620,7 +828,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '11:45',
       expectedConsultationTime: '11:55',
@@ -650,7 +858,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '12:00',
       expectedConsultationTime: '12:05',
@@ -680,7 +888,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: today,
       bookedTime: '12:15',
       expectedConsultationTime: '12:15',
@@ -710,7 +918,7 @@ export function getInitialSeedData(): DatabaseState {
       doctorId: 'dr-subba-rao',
       doctorName: 'Dr. Subba Rao Vadarevu',
       branchId: 'kakinada',
-      branchName: 'Sri Devi Children Hospital - Kakinada',
+      branchName: 'Apex Multi-Specialty Hospital - Main Campus',
       date: tomorrow,
       bookedTime: '11:15',
       expectedConsultationTime: '11:15',
@@ -802,7 +1010,7 @@ export function getInitialSeedData(): DatabaseState {
       rating: 5,
       date: '1 week ago',
       branch: 'Kakinada',
-      comment: 'Sri Devi Children Hospital has been our family doctor since my childhood. Now I bring my son here. The experience and personal touch cannot be matched by any corporate setup.',
+      comment: 'Apex Multi-Specialty Hospital has been our family doctor since my childhood. Now I bring my son here. The experience and personal touch cannot be matched by any corporate setup.',
       featured: true,
     },
     {
@@ -833,7 +1041,7 @@ export function getInitialSeedData(): DatabaseState {
       appointmentId: 'apt-4',
       parentId: 'p4',
       title: 'Consultation Approaching',
-      message: 'Your child\'s consultation is approaching. There are currently 2 children ahead of you. Please proceed to Sri Devi Children Hospital.',
+      message: 'Your child\'s consultation is approaching. There are currently 2 children ahead of you. Please proceed to Apex Multi-Specialty Hospital.',
       type: 'APPROACHING',
       timestamp: `${today} 10:00`,
       read: false,
@@ -872,7 +1080,7 @@ export function getInitialSeedData(): DatabaseState {
         givenDate: isGiven ? dueDate : undefined,
         administeredBy: isGiven ? 'Dr. Subba Rao Vadarevu' : undefined,
         batchNumber: isGiven ? `SRI-VAC-${m.offsetDays || '00'}` : undefined,
-        notes: isGiven ? 'Administered on schedule at Sri Devi Children Hospital.' : undefined,
+        notes: isGiven ? 'Administered on schedule at Apex Multi-Specialty Hospital.' : undefined,
         weightKg: isGiven ? (m.offsetDays === 0 ? 3.1 : m.offsetDays === 42 ? 4.5 : 5.8) : undefined,
         heightCm: isGiven ? (m.offsetDays === 0 ? 50 : m.offsetDays === 42 ? 55 : 61) : undefined,
       };
@@ -1108,7 +1316,7 @@ export function getInitialSeedData(): DatabaseState {
         doctorId: 'dr-subba-rao',
         doctorName: 'Dr. Subba Rao Vadarevu',
         doctorRegNo: 'APMC-38492',
-        hospitalName: 'Sri Devi Children Hospital',
+        hospitalName: 'Apex Multi-Specialty Hospital',
         branchId: 'kakinada',
         date: '2026-07-22',
         version: 1,
@@ -1154,6 +1362,10 @@ export function getInitialSeedData(): DatabaseState {
   ];
 
   return {
+    hospitals,
+    hospitalAdmins,
+    hospitalAdminPasswords,
+    hospitalAdminSessionsAuth: [],
     parents,
     parentPasswords,
     receptionUsers,
