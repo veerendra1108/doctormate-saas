@@ -397,6 +397,15 @@ apiRouter.get('/hospital-admin/:hospitalId/dashboard', (req, res) => {
   const schedules = (state.schedules || []).filter((s) => (s.hospitalId || 'hosp_sdch') === hospitalId);
   const receptionists = (state.receptionUsers || []).filter((r) => (r.hospitalId || 'hosp_sdch') === hospitalId);
 
+  // Attach per-doctor schedule for rich frontend editing
+  const doctorsWithSchedules = doctors.map((doc) => {
+    const sch = schedules.find((s) => s.doctorId === doc.id);
+    return {
+      ...doc,
+      schedule: sch || null,
+    };
+  });
+
   const today = state.config.simulatedDate;
   const todayAppts = (state.appointments || []).filter(
     (a) => (a.hospitalId || 'hosp_sdch') === hospitalId && a.date === today
@@ -405,7 +414,7 @@ apiRouter.get('/hospital-admin/:hospitalId/dashboard', (req, res) => {
   res.json({
     hospital,
     bookingUrl: `/hospital/${hospital.slug}`,
-    doctors,
+    doctors: doctorsWithSchedules,
     branches,
     schedules,
     receptionists,
@@ -435,19 +444,29 @@ apiRouter.post('/hospital-admin/:hospitalId/doctors', (req, res) => {
     consultationFee,
     startTime,
     endTime,
+    bufferMinutesPerHour,
     mobile,
     email,
   } = req.body;
 
-  if (!name) return res.status(400).json({ error: 'Doctor name is required.' });
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'Doctor name is required.' });
+  }
 
   const state = db.getState();
   const hospital = (state.hospitals || []).find((h) => h.id === hospitalId);
   if (!hospital) return res.status(404).json({ error: 'Hospital not found.' });
 
+  const start = startTime || '09:00';
+  const end = endTime || '17:00';
+  if (start >= end) {
+    return res.status(400).json({ error: 'OPD start time must be earlier than end time.' });
+  }
+
   const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   const customSlotDuration = Number(slotDurationMinutes) || 15;
-  const days = Array.isArray(availableDays) ? availableDays : [1, 2, 3, 4, 5, 6];
+  const customBuffer = bufferMinutesPerHour !== undefined && !isNaN(Number(bufferMinutesPerHour)) ? Number(bufferMinutesPerHour) : 10;
+  const days = Array.isArray(availableDays) && availableDays.length > 0 ? availableDays : [1, 2, 3, 4, 5, 6];
   const branchId = state.branches.find((b) => (b.hospitalId || 'hosp_sdch') === hospitalId)?.id || 'main';
 
   const newDoc: Doctor = {
@@ -474,10 +493,10 @@ apiRouter.post('/hospital-admin/:hospitalId/doctors', (req, res) => {
     doctorId: docId,
     branchId,
     daysOfWeek: days,
-    startTime: startTime || '09:00',
-    endTime: endTime || '17:00',
+    startTime: start,
+    endTime: end,
     slotDurationMinutes: customSlotDuration,
-    bufferMinutesPerHour: 10,
+    bufferMinutesPerHour: customBuffer,
     isAvailable: true,
     notes: 'Standard Consultation Schedule',
   };
@@ -486,7 +505,123 @@ apiRouter.post('/hospital-admin/:hospitalId/doctors', (req, res) => {
   state.schedules.push(newSchedule);
   db.persistState();
 
-  res.json({ success: true, doctor: newDoc, schedule: newSchedule });
+  res.json({
+    success: true,
+    doctor: { ...newDoc, schedule: newSchedule },
+    schedule: newSchedule,
+  });
+});
+
+// Edit Existing Doctor & Schedule
+apiRouter.put('/hospital-admin/:hospitalId/doctors/:doctorId', (req, res) => {
+  const { hospitalId, doctorId } = req.params;
+  const {
+    name,
+    specialty,
+    qualifications,
+    experienceYears,
+    summary,
+    slotDurationMinutes,
+    availableDays,
+    consultationFee,
+    startTime,
+    endTime,
+    bufferMinutesPerHour,
+    mobile,
+    email,
+  } = req.body;
+
+  const state = db.getState();
+  const doc = state.doctors.find((d) => d.id === doctorId && (d.hospitalId || 'hosp_sdch') === hospitalId);
+  if (!doc) {
+    return res.status(404).json({ error: 'Doctor not found in this hospital.' });
+  }
+
+  if (name !== undefined) {
+    if (!String(name).trim()) {
+      return res.status(400).json({ error: 'Doctor name is required.' });
+    }
+    doc.name = String(name).trim();
+  }
+  if (specialty !== undefined) doc.specialty = String(specialty).trim();
+  if (qualifications !== undefined) doc.qualifications = String(qualifications).trim();
+  if (experienceYears !== undefined) doc.experienceYears = Number(experienceYears) || 0;
+  if (summary !== undefined) doc.summary = String(summary).trim();
+  if (consultationFee !== undefined) doc.consultationFee = Number(consultationFee) || 0;
+  if (mobile !== undefined) doc.mobile = mobile;
+  if (email !== undefined) doc.email = email;
+
+  if (slotDurationMinutes !== undefined) {
+    doc.slotDurationMinutes = Number(slotDurationMinutes) || 15;
+  }
+  if (availableDays !== undefined && Array.isArray(availableDays)) {
+    doc.availableDays = availableDays;
+  }
+
+  // Find or create schedule for doctor
+  let schedule = state.schedules.find((s) => s.doctorId === doctorId && (s.hospitalId || 'hosp_sdch') === hospitalId);
+  const branchId = doc.branches[0] || state.branches.find((b) => (b.hospitalId || 'hosp_sdch') === hospitalId)?.id || 'main';
+
+  const newStart = startTime || (schedule ? schedule.startTime : '09:00');
+  const newEnd = endTime || (schedule ? schedule.endTime : '17:00');
+
+  if (newStart >= newEnd) {
+    return res.status(400).json({ error: 'OPD start time must be earlier than end time.' });
+  }
+
+  const customSlotDuration = doc.slotDurationMinutes || 15;
+  const customBuffer = bufferMinutesPerHour !== undefined && !isNaN(Number(bufferMinutesPerHour))
+    ? Number(bufferMinutesPerHour)
+    : (schedule ? schedule.bufferMinutesPerHour : 10);
+  const days = doc.availableDays || [1, 2, 3, 4, 5, 6];
+
+  if (!schedule) {
+    schedule = {
+      id: `sch_${doctorId}`,
+      hospitalId,
+      doctorId,
+      branchId,
+      daysOfWeek: days,
+      startTime: newStart,
+      endTime: newEnd,
+      slotDurationMinutes: customSlotDuration,
+      bufferMinutesPerHour: customBuffer,
+      isAvailable: true,
+      notes: 'Consultation Schedule',
+    };
+    state.schedules.push(schedule);
+  } else {
+    schedule.startTime = newStart;
+    schedule.endTime = newEnd;
+    schedule.daysOfWeek = days;
+    schedule.slotDurationMinutes = customSlotDuration;
+    schedule.bufferMinutesPerHour = customBuffer;
+  }
+
+  db.persistState();
+
+  res.json({
+    success: true,
+    doctor: { ...doc, schedule },
+    schedule,
+  });
+});
+
+// Delete Doctor from Hospital
+apiRouter.delete('/hospital-admin/:hospitalId/doctors/:doctorId', (req, res) => {
+  const { hospitalId, doctorId } = req.params;
+  const state = db.getState();
+
+  const docIdx = state.doctors.findIndex((d) => d.id === doctorId && (d.hospitalId || 'hosp_sdch') === hospitalId);
+  if (docIdx === -1) {
+    return res.status(404).json({ error: 'Doctor not found in this hospital.' });
+  }
+
+  state.doctors.splice(docIdx, 1);
+  state.schedules = state.schedules.filter((s) => !(s.doctorId === doctorId && (s.hospitalId || 'hosp_sdch') === hospitalId));
+  db.persistState();
+
+  res.json({ success: true, message: 'Doctor and schedule removed.' });
 });
 
 // Add Receptionist to Hospital
@@ -1048,12 +1183,20 @@ apiRouter.post('/auth/reception-login', (req, res) => {
 // --- DOCTORS & SCHEDULES ---
 
 apiRouter.get('/doctors', (req, res) => {
+  const { hospitalId } = req.query;
   const state = db.getState();
+  if (hospitalId) {
+    return res.json(state.doctors.filter((d) => (d.hospitalId || 'hosp_sdch') === String(hospitalId)));
+  }
   res.json(state.doctors);
 });
 
 apiRouter.get('/branches', (req, res) => {
+  const { hospitalId } = req.query;
   const state = db.getState();
+  if (hospitalId) {
+    return res.json(state.branches.filter((b) => (b.hospitalId || 'hosp_sdch') === String(hospitalId)));
+  }
   res.json(state.branches);
 });
 

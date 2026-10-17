@@ -356,6 +356,114 @@ async function runTestSuite() {
     assert(auroraDashboardRes.ok && !!auroraDashboardData.hospital?.name, 'DM-R2-004: Admin dashboard payload successfully resolves without crash');
     assert(typeof auroraDashboardData.stats?.totalDoctors === 'number', 'DM-R2-004: Stats totalDoctors calculated');
     assert(Array.isArray(auroraDashboardData.todayAppointments), 'DM-R2-004: Today appointments array returned');
+
+    // ==========================================
+    // ROUND 3 QA REGRESSION TESTS (DM-R3-001, DM-R3-002, DM-R3-003)
+    // ==========================================
+
+    // DM-R3-002: Add Doctor validation - invalid start time >= end time rejected
+    const invalidTimeRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dr. Invalid Timing',
+        startTime: '18:00',
+        endTime: '09:00', // Invalid: end time before start time
+      }),
+    });
+    assert(!invalidTimeRes.ok && invalidTimeRes.status === 400, 'DM-R3-002: Reject doctor schedule when start time >= end time');
+
+    // DM-R3-002: Add Doctor with full OPD schedule configuration (hours, days, breaks)
+    const addDocRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dr. QA Meridian Synthetic',
+        specialty: 'QA General Medicine',
+        qualifications: 'MBBS, MD',
+        experienceYears: 5,
+        slotDurationMinutes: 20,
+        consultationFee: 750,
+        startTime: '08:30',
+        endTime: '16:30',
+        availableDays: [1, 2, 3, 4, 5],
+        bufferMinutesPerHour: 15,
+      }),
+    });
+    const addDocData = await addDocRes.json();
+    assert(addDocRes.ok && addDocData.success, 'DM-R3-002: Doctor created with OPD schedule');
+    assert(addDocData.doctor?.slotDurationMinutes === 20, 'DM-R3-002: Custom 20-min slot duration persisted');
+    assert(addDocData.schedule?.startTime === '08:30' && addDocData.schedule?.endTime === '16:30', 'DM-R3-002: OPD start and end times saved');
+    assert(addDocData.schedule?.bufferMinutesPerHour === 15, 'DM-R3-002: OPD buffer minutes saved');
+    const createdDoctorId = addDocData.doctor.id;
+
+    // DM-R3-001: Edit existing doctor & consultation settings (PUT endpoint)
+    const editDocRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors/${createdDoctorId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dr. QA Meridian Synthetic (Lead Specialist)',
+        specialty: 'Senior Pediatric Cardiology',
+        slotDurationMinutes: 10,
+        consultationFee: 900,
+        startTime: '09:00',
+        endTime: '18:00',
+        availableDays: [1, 2, 3, 4, 5, 6],
+        bufferMinutesPerHour: 10,
+      }),
+    });
+    const editDocData = await editDocRes.json();
+    assert(editDocRes.ok && editDocData.success, 'DM-R3-001: Edit doctor API succeeded');
+    assert(editDocData.doctor?.name === 'Dr. QA Meridian Synthetic (Lead Specialist)', 'DM-R3-001: Updated doctor name persisted');
+    assert(editDocData.doctor?.slotDurationMinutes === 10, 'DM-R3-001: Updated slot duration to 10 min persisted');
+    assert(editDocData.schedule?.endTime === '18:00', 'DM-R3-001: Updated schedule end time to 18:00');
+
+    // Verify hospital admin dashboard reflects the edited doctor and schedule
+    const reloadedDashboardRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/dashboard`);
+    const reloadedDashboard = await reloadedDashboardRes.json();
+    const updatedDocInDash = reloadedDashboard.doctors.find((d: any) => d.id === createdDoctorId);
+    assert(!!updatedDocInDash, 'DM-R3-001: Edited doctor listed in hospital admin dashboard');
+    assert(updatedDocInDash.schedule?.startTime === '09:00', 'DM-R3-002: Admin dashboard provides schedule start time');
+    assert(updatedDocInDash.schedule?.bufferMinutesPerHour === 10, 'DM-R3-002: Admin dashboard provides buffer/break time');
+
+    // DM-R3-003: Receptionist tenant isolation & hospital scope
+    const addRecRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/receptionists`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'qa.aurora.desk.test',
+        password: 'Reception@123',
+        name: 'QA Aurora Front Desk',
+      }),
+    });
+    const addRecData = await addRecRes.json();
+    assert(addRecRes.ok && addRecData.success, 'DM-R3-003: Receptionist account created under Aurora');
+
+    // Receptionist login
+    const recLoginRes = await fetch(`${baseUrl}/auth/reception-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'qa.aurora.desk.test',
+        password: 'Reception@123',
+      }),
+    });
+    const recLoginData = await recLoginRes.json();
+    assert(recLoginRes.ok && recLoginData.success, 'DM-R3-003: Receptionist logged in successfully');
+    assert(recLoginData.user?.hospitalId === auroraId, 'DM-R3-003: Receptionist user scoped to Aurora hospitalId');
+
+    // Check doctors scoped to Aurora hospital
+    const scopedDocsRes = await fetch(`${baseUrl}/doctors?hospitalId=${auroraId}`);
+    const scopedDocs = await scopedDocsRes.json();
+    assert(Array.isArray(scopedDocs), 'DM-R3-003: Scoped doctors returned as array');
+    assert(scopedDocs.every((d: any) => d.hospitalId === auroraId), 'DM-R3-003: Zero doctors from other hospitals exposed in Aurora scope');
+    assert(!scopedDocs.some((d: any) => d.id === 'dr-subba-rao' || d.id === 'dr-prashant'), 'DM-R3-003: Apex doctors excluded from Aurora receptionist scope');
+
+    // Check branches scoped to Aurora hospital
+    const scopedBranchesRes = await fetch(`${baseUrl}/branches?hospitalId=${auroraId}`);
+    const scopedBranches = await scopedBranchesRes.json();
+    assert(scopedBranches.every((b: any) => b.hospitalId === auroraId), 'DM-R3-003: Zero branches from other hospitals exposed in Aurora scope');
+    assert(!scopedBranches.some((b: any) => b.id === 'kakinada' || b.id === 'pithapuram'), 'DM-R3-003: Kakinada/Pithapuram excluded from Aurora scope');
   } catch (err) {
     console.error('Test execution failed with error:', err);
     failed++;

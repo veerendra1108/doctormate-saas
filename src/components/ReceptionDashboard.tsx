@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Appointment,
   Doctor,
@@ -69,13 +69,31 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   onOpenAnalytics,
   onConfigUpdate,
 }) => {
-  const [selectedBranchId, setSelectedBranchId] = useState<BranchId>(receptionUser.branchId);
+  const hospitalDoctors = useMemo(() => {
+    if (!receptionUser?.hospitalId) return doctors;
+    return doctors.filter((d) => (d.hospitalId || 'hosp_sdch') === receptionUser.hospitalId);
+  }, [doctors, receptionUser?.hospitalId]);
+
+  const hospitalBranches = useMemo(() => {
+    if (!receptionUser?.hospitalId) return branches;
+    return branches.filter((b) => (b.hospitalId || 'hosp_sdch') === receptionUser.hospitalId);
+  }, [branches, receptionUser?.hospitalId]);
+
+  const [selectedBranchId, setSelectedBranchId] = useState<BranchId>(
+    receptionUser.branchId || (hospitalBranches[0]?.id || 'main')
+  );
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('all');
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>(config.simulatedDate);
   const [isAllDates, setIsAllDates] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [queueData, setQueueData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (hospitalBranches.length > 0 && !hospitalBranches.some((b) => b.id === selectedBranchId)) {
+      setSelectedBranchId(hospitalBranches[0].id);
+    }
+  }, [hospitalBranches, selectedBranchId]);
 
   // Vaccine Desk State
   const [activeMainTab, setActiveMainTab] = useState<'QUEUE' | 'VACCINES'>('QUEUE');
@@ -116,8 +134,14 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   const [parentSearchStatus, setParentSearchStatus] = useState<{ searched: boolean; found: boolean; message?: string }>({ searched: false, found: false });
   const [selectedChildId, setSelectedChildId] = useState('');
   const [phoneBookingDate, setPhoneBookingDate] = useState(config.simulatedDate);
-  const [phoneBookingDoctor, setPhoneBookingDoctor] = useState('dr-subba-rao');
+  const [phoneBookingDoctor, setPhoneBookingDoctor] = useState(hospitalDoctors[0]?.id || 'dr-subba-rao');
   const [phoneSlots, setPhoneSlots] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (hospitalDoctors.length > 0 && !hospitalDoctors.some((d) => d.id === phoneBookingDoctor)) {
+      setPhoneBookingDoctor(hospitalDoctors[0].id);
+    }
+  }, [hospitalDoctors, phoneBookingDoctor]);
   const [selectedPhoneSlot, setSelectedPhoneSlot] = useState('');
 
   // Edit Appointment State (Allowed until patient was sent to doctor)
@@ -733,30 +757,28 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
 
           <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
             {/* Branch Selector */}
-            <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200 text-xs">
-              <button
-                id="rec-branch-kakinada"
-                onClick={() => setSelectedBranchId('kakinada')}
-                className={`px-3 py-1.5 rounded-xl font-semibold transition ${
-                  selectedBranchId === 'kakinada'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Kakinada Branch
-              </button>
-              <button
-                id="rec-branch-pithapuram"
-                onClick={() => setSelectedBranchId('pithapuram')}
-                className={`px-3 py-1.5 rounded-xl font-semibold transition ${
-                  selectedBranchId === 'pithapuram'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Pithapuram Branch
-              </button>
-            </div>
+            {hospitalBranches.length > 0 ? (
+              <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200 text-xs">
+                {hospitalBranches.map((br) => (
+                  <button
+                    key={br.id}
+                    id={`rec-branch-${br.id}`}
+                    onClick={() => setSelectedBranchId(br.id)}
+                    className={`px-3 py-1.5 rounded-xl font-semibold transition cursor-pointer ${
+                      selectedBranchId === br.id
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {br.name}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center bg-slate-100 px-3 py-1.5 rounded-2xl border border-slate-200 text-xs font-semibold text-slate-700">
+                {receptionUser.hospitalName || 'Main Branch'}
+              </div>
+            )}
 
             {/* Quick Actions */}
             <button
@@ -906,10 +928,10 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             }`}
           >
             <Users className="w-4 h-4" />
-            <span>All Doctors ({doctors.length})</span>
+            <span>All Doctors ({hospitalDoctors.length})</span>
           </button>
 
-          {doctors.map((doc) => (
+          {hospitalDoctors.map((doc) => (
             <button
               key={doc.id}
               id={`rec-doc-pill-${doc.id}`}
@@ -927,9 +949,6 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 referrerPolicy="no-referrer"
               />
               <span>{doc.name}</span>
-              {doc.id === 'dr-subba-rao' && (
-                <span className="text-[10px] opacity-80">(Configured Days)</span>
-              )}
             </button>
           ))}
         </div>
@@ -943,8 +962,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
               </span>
               <h3 className="text-xl font-bold text-slate-900">
                 {selectedDoctorId === 'all'
-                  ? `All Doctors • ${branches.find((b) => b.id === selectedBranchId)?.name || 'Main Hospital'}`
-                  : doctors.find((d) => d.id === selectedDoctorId)?.name}
+                  ? `All Doctors • ${hospitalBranches.find((b) => b.id === selectedBranchId)?.name || receptionUser.hospitalName || 'Main Hospital'}`
+                  : hospitalDoctors.find((d) => d.id === selectedDoctorId)?.name}
               </h3>
             </div>
 

@@ -495,17 +495,24 @@ export class SqliteManager {
 
       // Reception Users
       const insertReception = this.db.prepare(`
-        INSERT INTO reception_users (username, password, branch_id, name)
-        VALUES (@username, @password, @branchId, @name)
+        INSERT INTO reception_users (username, password, branch_id, name, hospital_id, assigned_doctors_json)
+        VALUES (@username, @password, @branchId, @name, @hospitalId, @assignedDoctorsJson)
       `);
       for (const u of seed.receptionUsers) {
-        insertReception.run(u);
+        insertReception.run({
+          username: u.username,
+          password: u.password,
+          branchId: u.branchId,
+          name: u.name,
+          hospitalId: u.hospitalId || 'hosp_sdch',
+          assignedDoctorsJson: JSON.stringify(u.assignedDoctorIds || []),
+        });
       }
 
       // Doctors
       const insertDoctor = this.db.prepare(`
-        INSERT INTO doctors (id, name, photo_url, qualifications, specialty, experience_years, summary, branches_json, active, schedule_description, medical_registration_no, mobile, email, digital_signature_url)
-        VALUES (@id, @name, @photoUrl, @qualifications, @specialty, @experienceYears, @summary, @branchesJson, @active, @scheduleDescription, @medicalRegistrationNo, @mobile, @email, @digitalSignatureUrl)
+        INSERT INTO doctors (id, name, photo_url, qualifications, specialty, experience_years, summary, branches_json, active, schedule_description, medical_registration_no, mobile, email, digital_signature_url, hospital_id, slot_duration_minutes, available_days_json, consultation_fee)
+        VALUES (@id, @name, @photoUrl, @qualifications, @specialty, @experienceYears, @summary, @branchesJson, @active, @scheduleDescription, @medicalRegistrationNo, @mobile, @email, @digitalSignatureUrl, @hospitalId, @slotDurationMinutes, @availableDaysJson, @consultationFee)
       `);
       for (const d of seed.doctors) {
         insertDoctor.run({
@@ -523,14 +530,18 @@ export class SqliteManager {
           mobile: d.mobile || null,
           email: d.email || null,
           digitalSignatureUrl: d.digitalSignatureUrl || null,
+          hospitalId: d.hospitalId || 'hosp_sdch',
+          slotDurationMinutes: d.slotDurationMinutes || 15,
+          availableDaysJson: JSON.stringify(d.availableDays || [0, 1, 2, 3, 4, 5, 6]),
+          consultationFee: d.consultationFee || 500,
         });
       }
 
       // Doctor Accounts
       if (seed.doctorAccounts) {
         const insertDocAcc = this.db.prepare(`
-          INSERT INTO doctor_accounts (id, doctor_id, name, email, mobile, password_hash, medical_registration_no, digital_signature_url, is_approved, is_active)
-          VALUES (@id, @doctorId, @name, @email, @mobile, @passwordHash, @medicalRegistrationNo, @digitalSignatureUrl, @isApproved, @isActive)
+          INSERT INTO doctor_accounts (id, doctor_id, name, email, mobile, password_hash, medical_registration_no, digital_signature_url, is_approved, is_active, hospital_id)
+          VALUES (@id, @doctorId, @name, @email, @mobile, @passwordHash, @medicalRegistrationNo, @digitalSignatureUrl, @isApproved, @isActive, @hospitalId)
         `);
         for (const da of seed.doctorAccounts) {
           insertDocAcc.run({
@@ -544,26 +555,28 @@ export class SqliteManager {
             digitalSignatureUrl: da.digitalSignatureUrl || null,
             isApproved: da.isApproved ? 1 : 0,
             isActive: da.isActive ? 1 : 0,
+            hospitalId: da.hospitalId || 'hosp_sdch',
           });
         }
       }
 
       // Branches
       const insertBranch = this.db.prepare(`
-        INSERT INTO branches (id, name, address, landmark, phone, emergency_phone, timings, map_embed_url, google_maps_url)
-        VALUES (@id, @name, @address, @landmark, @phone, @emergencyPhone, @timings, @mapEmbedUrl, @googleMapsUrl)
+        INSERT INTO branches (id, name, address, landmark, phone, emergency_phone, timings, map_embed_url, google_maps_url, hospital_id)
+        VALUES (@id, @name, @address, @landmark, @phone, @emergencyPhone, @timings, @mapEmbedUrl, @googleMapsUrl, @hospitalId)
       `);
       for (const b of seed.branches) {
         insertBranch.run({
           ...b,
           mapEmbedUrl: b.mapEmbedUrl || null,
+          hospitalId: b.hospitalId || 'hosp_sdch',
         });
       }
 
       // Schedules
       const insertSchedule = this.db.prepare(`
-        INSERT INTO doctor_schedules (id, doctor_id, branch_id, days_of_week_json, start_time, end_time, slot_duration_minutes, buffer_minutes_per_hour, is_available, notes)
-        VALUES (@id, @doctorId, @branchId, @daysOfWeekJson, @startTime, @endTime, @slotDurationMinutes, @bufferMinutesPerHour, @isAvailable, @notes)
+        INSERT INTO doctor_schedules (id, doctor_id, branch_id, days_of_week_json, start_time, end_time, slot_duration_minutes, buffer_minutes_per_hour, is_available, notes, hospital_id)
+        VALUES (@id, @doctorId, @branchId, @daysOfWeekJson, @startTime, @endTime, @slotDurationMinutes, @bufferMinutesPerHour, @isAvailable, @notes, @hospitalId)
       `);
       for (const s of seed.schedules) {
         insertSchedule.run({
@@ -574,9 +587,10 @@ export class SqliteManager {
           startTime: s.startTime,
           endTime: s.endTime,
           slotDurationMinutes: s.slotDurationMinutes,
-          bufferMinutesPerHour: s.bufferMinutesPerHour,
+          bufferMinutesPerHour: s.bufferMinutesPerHour || 10,
           isAvailable: s.isAvailable ? 1 : 0,
           notes: s.notes || null,
+          hospitalId: s.hospitalId || 'hosp_sdch',
         });
       }
 

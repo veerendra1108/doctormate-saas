@@ -449,6 +449,7 @@ export default function App() {
   }) => {
     setReceptionUser(user);
     localStorage.setItem('doctormate_reception_user', JSON.stringify(user));
+    loadHospitalData();
     setActiveTab('reception-desk');
   };
 
@@ -727,8 +728,16 @@ export default function App() {
         ) : activeTab === 'reception-desk' && receptionUser ? (
           <ReceptionDashboard
             receptionUser={receptionUser}
-            doctors={doctors}
-            branches={branches}
+            doctors={
+              receptionUser.hospitalId
+                ? doctors.filter((d) => (d.hospitalId || 'hosp_sdch') === receptionUser.hospitalId)
+                : doctors
+            }
+            branches={
+              receptionUser.hospitalId
+                ? branches.filter((b) => (b.hospitalId || 'hosp_sdch') === receptionUser.hospitalId)
+                : branches
+            }
             config={config}
             onLogout={handleLogoutReception}
             onOpenAnalytics={() => setIsAnalyticsOpen(true)}

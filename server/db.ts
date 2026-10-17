@@ -1447,23 +1447,7 @@ class Database {
           this.persistState();
         }
 
-        // Ensure both doctors have daily schedules from 10:00 to 19:00 across branches
-        const freshSeed = getInitialSeedData();
-        const hasOutdatedSchedules = !this.state.schedules || this.state.schedules.length === 0 || this.state.schedules.some(
-          (s) => s.startTime !== '10:00' || s.endTime !== '19:00' || !s.daysOfWeek || s.daysOfWeek.length !== 7
-        );
-        if (hasOutdatedSchedules) {
-          console.log('[Database] Synchronizing doctor schedules to daily 10:00 AM - 07:00 PM...');
-          this.state.schedules = freshSeed.schedules;
-          this.state.doctors = freshSeed.doctors;
-          this.state.branches = freshSeed.branches;
-          if (this.state.sessions) {
-            this.state.sessions.forEach((sess) => {
-              sess.scheduledStart = '10:00';
-            });
-          }
-          this.persistState();
-        }
+
 
         const fresh = getInitialSeedData();
         // Ensure doctor accounts, permanent child IDs and clinical data are loaded
