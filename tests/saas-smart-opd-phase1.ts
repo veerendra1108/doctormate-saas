@@ -573,6 +573,1214 @@ async function runTestSuite() {
     const phoneAppts = recAppointments.filter((a: any) => a.bookingSource === 'PHONE' || a.source === 'PHONE');
     assert(phoneAppts.length >= 2, `DM-R4-002: Phone bookings correctly persisted with PHONE source (found ${phoneAppts.length})`);
 
+    // --- Step 10: QA Round 5 Regression Tests (DM-R5-001 Working-Day Restrictions) ---
+    console.log('\n--- Step 10: QA Round 5 Regression Tests (DM-R5-001) ---');
+    const sundayDate = '2026-10-18'; // Sunday (day 0)
+    const mondayDate = '2026-10-19'; // Monday (day 1)
+
+    // Create doctor Dr. QA Meridian Revised specifically configured Mon-Sat (days [1, 2, 3, 4, 5, 6])
+    const docMeridianRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dr. QA Meridian Revised',
+        specialty: 'Pediatric Pulmonology',
+        slotDurationMinutes: 20,
+        consultationFee: 800,
+        startTime: '10:00',
+        endTime: '16:00',
+        availableDays: [1, 2, 3, 4, 5, 6], // Mon-Sat only (excludes Sunday)
+        bufferMinutesPerHour: 0,
+      }),
+    });
+    const docMeridianData = await docMeridianRes.json();
+    assert(docMeridianRes.ok && docMeridianData.success, 'DM-R5-001: Dr. QA Meridian Revised created with Mon-Sat configuration');
+    const docMeridianId = docMeridianData.doctor.id;
+
+    // Doctor with Mon-Sat schedule (days [1, 2, 3, 4, 5, 6])
+    const sundaySlotsRes = await fetch(`${baseUrl}/slots?doctorId=${docMeridianId}&branchId=main&date=${sundayDate}`);
+    const sundaySlots = await sundaySlotsRes.json();
+    assert(Array.isArray(sundaySlots) && sundaySlots.length === 0, 'DM-R5-001: Querying slots on Sunday for Mon-Sat doctor returns 0 slots');
+
+    // Attempting online booking on Sunday for Mon-Sat doctor must be REJECTED with 400
+    const sundayOnlineRes = await fetch(`${baseUrl}/appointments/online-book`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        date: sundayDate,
+        bookedTime: '10:00',
+        patientName: 'QA Sunday Epsilon',
+        mobileNumber: '9000000511',
+      }),
+    });
+    const sundayOnlineData = await sundayOnlineRes.json();
+    assert(sundayOnlineRes.status === 400, 'DM-R5-001: Public online booking on off-day (Sunday) rejected with 400 Bad Request');
+    assert(sundayOnlineData.error && sundayOnlineData.error.toLowerCase().includes('not scheduled'), 'DM-R5-001: Clear explanation that doctor is not scheduled on Sundays');
+
+    // Attempting phone booking on Sunday for Mon-Sat doctor must also be REJECTED with 400
+    const sundayPhoneRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        date: sundayDate,
+        bookedTime: '10:00',
+        patientName: 'QA Sunday Phone',
+        mobileNumber: '9000000512',
+      }),
+    });
+    const sundayPhoneData = await sundayPhoneRes.json();
+    assert(sundayPhoneRes.status === 400, 'DM-R5-001: Reception phone booking on off-day (Sunday) rejected with 400 Bad Request');
+    assert(sundayPhoneData.error && sundayPhoneData.error.toLowerCase().includes('not scheduled'), 'DM-R5-001: Reception desk receives not-scheduled error on Sunday booking');
+
+    // Valid Monday booking must succeed and show slots
+    const mondaySlotsRes = await fetch(`${baseUrl}/slots?doctorId=${docMeridianId}&branchId=main&date=${mondayDate}`);
+    const mondaySlots = await mondaySlotsRes.json();
+    assert(Array.isArray(mondaySlots) && mondaySlots.length > 0, 'DM-R5-001: Querying slots on Monday for Mon-Sat doctor returns available slots');
+
+    const firstMondaySlot = mondaySlots.find((s: any) => s.available)?.time || '10:00';
+    const mondayOnlineRes = await fetch(`${baseUrl}/appointments/online-book`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        date: mondayDate,
+        bookedTime: firstMondaySlot,
+        patientName: 'QA Monday Valid',
+        mobileNumber: '9000000513',
+      }),
+    });
+    const mondayOnlineData = await mondayOnlineRes.json();
+    assert(mondayOnlineRes.ok && mondayOnlineData.token, `DM-R5-001: Booking on scheduled working day (Monday ${firstMondaySlot}) succeeds with token ${mondayOnlineData.token}`);
+
+    // =========================================================================
+    // Step 11: QA Round 6 Regression Tests (DM-R6-001, DM-R6-002, Live Delay)
+    // =========================================================================
+    console.log('\n--- Step 11: QA Round 6 Regression Tests (DM-R6-001 & DM-R6-002) ---');
+
+    // DM-R6-001: Patient tracker displays correct hospital name (not Sri Devi Children Hospital)
+    const auroraTrackerRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${mondayOnlineData.token}&mobileNumber=9000000513`
+    );
+    const auroraTrackerData = await auroraTrackerRes.json();
+    assert(auroraTrackerRes.ok && auroraTrackerData.success, 'DM-R6-001: Patient secure tracker loads successfully for tracked appointment');
+    assert(
+      auroraTrackerData.hospitalName === 'QA Aurora Test Hospital',
+      `DM-R6-001: Patient tracker displays correct hospital "${auroraTrackerData.hospitalName}" (must equal "QA Aurora Test Hospital", NOT "Sri Devi Children Hospital")`
+    );
+    assert(auroraTrackerData.doctorName === 'Dr. QA Meridian Revised', 'DM-R6-001: Patient tracker displays correct doctor name');
+    assert(auroraTrackerData.patientName === 'QA Monday Valid', 'DM-R6-001: Patient tracker displays correct patient name');
+
+    // DM-R6-002: Tracked appointments visible in receptionist queue
+    const auroraReceptionRes = await fetch(
+      `${baseUrl}/reception/dashboard?hospitalId=${auroraId}&date=${mondayDate}`
+    );
+    const auroraReceptionData = await auroraReceptionRes.json();
+    assert(auroraReceptionRes.ok, 'DM-R6-002: Reception dashboard query succeeds for scheduled date');
+    assert(Array.isArray(auroraReceptionData.appointments), 'DM-R6-002: Reception dashboard returns appointments array');
+    const trackedInReception = auroraReceptionData.appointments.find(
+      (a: any) => a.appointmentNumber === mondayOnlineData.token
+    );
+    assert(
+      trackedInReception !== undefined,
+      `DM-R6-002: Receptionist queue contains the tracked appointment ${mondayOnlineData.token} (appointments count: ${auroraReceptionData.appointments.length})`
+    );
+
+    // Book another appointment via phone to ensure multi-appointment queue visibility in reception
+    const secondMondaySlot = mondaySlots.find((s: any) => s.available && s.time !== firstMondaySlot)?.time || '10:30';
+    const mondayPhoneRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        date: mondayDate,
+        bookedTime: secondMondaySlot,
+        patientName: 'QA Monday Phone Tracked',
+        mobileNumber: '9000000514',
+      }),
+    });
+    const mondayPhoneData = await mondayPhoneRes.json();
+    assert(mondayPhoneRes.ok && mondayPhoneData.success, `DM-R6-002: Second phone booking at ${secondMondaySlot} succeeds with token ${mondayPhoneData.appointmentNumber}`);
+
+    // Verify both appointments are present in reception queue
+    const auroraReceptionRes2 = await fetch(
+      `${baseUrl}/reception/dashboard?hospitalId=${auroraId}&date=${mondayDate}`
+    );
+    const auroraReceptionData2 = await auroraReceptionRes2.json();
+    assert(
+      auroraReceptionData2.appointments.length >= 2,
+      `DM-R6-002: Reception dashboard shows both appointments (found ${auroraReceptionData2.appointments.length} appointments)`
+    );
+
+    // Live Doctor Delay Propagation (Round 6 Check 13 & 14)
+    const r6DelayRes = await fetch(`${baseUrl}/reception/doctor-delay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        date: mondayDate,
+        delayMinutes: 25,
+        explanation: 'Doctor running 25 minutes behind due to critical consultation',
+      }),
+    });
+    const r6DelayData = await r6DelayRes.json();
+    assert(r6DelayRes.ok && r6DelayData.success, 'Round 6 Check 13: Receptionist updates doctor delay to 25 minutes');
+
+    // Verify patient live tracker reflects the 25-minute delay and updated ETA (Check 14)
+    const trackerDelayRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${mondayOnlineData.token}&mobileNumber=9000000513`
+    );
+    const trackerDelayData = await trackerDelayRes.json();
+    assert(
+      trackerDelayData.estimatedDelayMinutes === 25,
+      `Round 6 Check 14: Patient live tracker reflects the 25-minute delay (got ${trackerDelayData.estimatedDelayMinutes} mins)`
+    );
+    assert(
+      trackerDelayData.hospitalName === 'QA Aurora Test Hospital',
+      'Round 6: Hospital name remains intact as QA Aurora Test Hospital after delay update'
+    );
+
+    // =========================================================================
+    // Step 12: QA Round 7 Regression Tests (DM-R7-001, DM-R7-002, DM-R7-003, DM-R7-004, DM-R7-005, DM-R7-006)
+    // =========================================================================
+    console.log('\n--- Step 12: QA Round 7 Regression Tests (DM-R7-001, DM-R7-002, DM-R7-003, DM-R7-004, DM-R7-005, DM-R7-006) ---');
+
+    // DM-R7-001: Emergency patient insertion appears in reception queue and maintains queue consistency
+    const emgRes = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        childName: 'QA Round7 Emergency Kappa',
+        parentName: 'QA Synthetic Guardian',
+        parentMobile: '9000000702',
+      }),
+    });
+    const emgData = await emgRes.json();
+    assert(emgRes.ok && emgData.success, 'DM-R7-001: Emergency patient insertion succeeds');
+    assert(emgData.appointment && emgData.appointment.isEmergency, 'DM-R7-001: Emergency flag set on returned appointment');
+    assert(emgData.appointment.hospitalId === auroraId, `DM-R7-001: Emergency appointment inherits hospitalId "${auroraId}"`);
+
+    // Verify emergency patient is present in reception live queue for this hospital
+    const emgDate = emgData.appointment.date;
+    const liveQueueRes = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=all`);
+    const liveQueueData = await liveQueueRes.json();
+    assert(liveQueueRes.ok, 'DM-R7-001: /queue/live query succeeds');
+    const emgInLiveQueue = liveQueueData.appointments.find((a: any) => a.childName === 'QA Round7 Emergency Kappa');
+    assert(
+      emgInLiveQueue !== undefined,
+      'DM-R7-001: Emergency patient is present in reception live queue (/queue/live) for the hospital'
+    );
+    assert(emgInLiveQueue.isEmergency === true, 'DM-R7-001: Patient is flagged as isEmergency in reception queue');
+
+    // DM-R7-003: No-show appointment reflects terminal status and suppresses active queue advice
+    // First mark an appointment as No-Show
+    const noShowTargetToken = mondayPhoneData.token || mondayPhoneData.appointmentNumber;
+    const noShowTargetId = mondayPhoneData.appointment?.id || noShowTargetToken;
+    const noShowRes = await fetch(`${baseUrl}/reception/no-show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: noShowTargetId }),
+    });
+    const noShowData = await noShowRes.json();
+    assert(noShowRes.ok && noShowData.success, 'DM-R7-003: Successfully marked appointment as No-Show');
+
+    // Query secure-track for this no-show appointment
+    const noShowTrackRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${noShowTargetToken}&mobileNumber=9000000514`
+    );
+    const noShowTrackData = await noShowTrackRes.json();
+    assert(noShowTrackRes.ok && noShowTrackData.success, 'DM-R7-003: Secure-track query for No-Show appointment succeeds');
+    assert(noShowTrackData.status === 'NO_SHOW', 'DM-R7-003: Tracker returns status NO_SHOW');
+    assert(noShowTrackData.isTerminal === true, 'DM-R7-003: isTerminal flag is true for No-Show appointment');
+    assert(
+      noShowTrackData.positionInQueue === null,
+      `DM-R7-003: Active queue position is suppressed (null) for released/no-show slot (got ${noShowTrackData.positionInQueue})`
+    );
+    assert(
+      noShowTrackData.patientsAhead === 0,
+      `DM-R7-003: Patients ahead is 0 for no-show appointment (got ${noShowTrackData.patientsAhead})`
+    );
+    assert(
+      noShowTrackData.recommendedArrivalTime === null,
+      `DM-R7-003: Active arrival advice / buffer is suppressed for released slot (got ${noShowTrackData.recommendedArrivalTime})`
+    );
+
+    // Scenario 10: Individual appointment cancellation
+    const cancelApptRes = await fetch(`${baseUrl}/reception/cancel-appointment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appointmentId: mondayOnlineData.token,
+        reason: 'QA Round7 individual appointment cancellation test',
+      }),
+    });
+    const cancelApptData = await cancelApptRes.json();
+    assert(cancelApptRes.ok && cancelApptData.success, 'Scenario 10: Individual appointment cancelled via /reception/cancel-appointment');
+    assert(
+      cancelApptData.appointment && cancelApptData.appointment.status === 'HOSPITAL_CANCELLED',
+      'Scenario 10: Appointment status updated to HOSPITAL_CANCELLED'
+    );
+
+    // Verify secure-track also marks HOSPITAL_CANCELLED as terminal and suppresses active metrics
+    const cancelTrackRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${mondayOnlineData.token}&mobileNumber=9000000513`
+    );
+    const cancelTrackData = await cancelTrackRes.json();
+    assert(cancelTrackRes.ok && cancelTrackData.success, 'Scenario 10: Secure-track query for cancelled appointment succeeds');
+    assert(cancelTrackData.status === 'HOSPITAL_CANCELLED', 'Scenario 10: Status is HOSPITAL_CANCELLED');
+    assert(cancelTrackData.isTerminal === true, 'Scenario 10: isTerminal flag is true for cancelled appointment');
+    assert(cancelTrackData.positionInQueue === null, 'Scenario 10: Queue position suppressed for cancelled appointment');
+
+    // Scenario 6: Scoped doctor late arrival control
+    const scopedLateRes = await fetch(`${baseUrl}/reception/doctor-delay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        date: mondayDate,
+        delayMinutes: 15,
+      }),
+    });
+    const scopedLateData = await scopedLateRes.json();
+    assert(scopedLateRes.ok && scopedLateData.success, 'Scenario 6: Scoped doctor delay applied successfully for doctor session');
+    assert(
+      scopedLateData.doctorId === docMeridianId,
+      `Scenario 6: Scoped late arrival targets selected doctor ${docMeridianId}`
+    );
+
+    // =========================================================================
+    // DM-R7-004: Reception Walk-In Booking Doctor Selection & Slot Validation
+    // =========================================================================
+    // Verify Walk-In booking assigns to selected doctor (Meridian) rather than Solstice or reception filter
+    const walkinRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        patientName: 'QA Round7 Retest Walkin Mu',
+        mobileNumber: '9000000713',
+        patientAge: 30,
+        date: mondayDate,
+        bookedTime: '11:00',
+        bookingSource: 'WALK_IN',
+      }),
+    });
+    const walkinData = await walkinRes.json();
+    assert(walkinRes.ok && walkinData.success, 'DM-R7-004: Walk-in appointment booking succeeds');
+    assert(
+      walkinData.appointment && walkinData.appointment.doctorId === docMeridianId,
+      `DM-R7-004: Saved appointment assigned to selected doctor ${docMeridianId} (got ${walkinData.appointment?.doctorId})`
+    );
+    assert(
+      walkinData.appointment && walkinData.appointment.doctorName === 'Dr. QA Meridian Revised',
+      'DM-R7-004: Appointment doctor name reflects Dr. QA Meridian Revised'
+    );
+    assert(
+      walkinData.appointment && walkinData.appointment.bookingSource === 'WALK_IN',
+      'DM-R7-004: Appointment bookingSource is WALK_IN'
+    );
+
+    // Verify appointment is in reception live queue under Dr. QA Meridian Revised
+    const liveQueueAllRes = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${mondayDate}&doctorId=all`);
+    const liveQueueAllData = await liveQueueAllRes.json();
+    assert(liveQueueAllRes.ok, 'DM-R7-004: Live queue query succeeds');
+    const walkinInQueue = liveQueueAllData.appointments.find((a: any) => a.childName === 'QA Round7 Retest Walkin Mu');
+    assert(walkinInQueue !== undefined, 'DM-R7-004: Walk-in patient present in reception queue');
+    assert(
+      walkinInQueue && walkinInQueue.doctorId === docMeridianId,
+      `DM-R7-004: Walk-in queue row belongs to selected doctor ${docMeridianId}`
+    );
+
+    // Verify patient secure tracker reflects Dr. QA Meridian Revised
+    const walkinTrackRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${walkinData.token}&mobileNumber=9000000713`
+    );
+    const walkinTrackData = await walkinTrackRes.json();
+    assert(walkinTrackRes.ok && walkinTrackData.success, 'DM-R7-004: Secure-track query for Walk-In succeeds');
+    assert(
+      walkinTrackData.doctorName === 'Dr. QA Meridian Revised',
+      `DM-R7-004: Tracker displays selected doctor Dr. QA Meridian Revised (got ${walkinTrackData.doctorName})`
+    );
+
+    // Verify server-side rejection for out-of-hours slot time (23:00 is outside doctor's consultation hours)
+    const invalidSlotRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        patientName: 'QA Invalid Slot Patient',
+        mobileNumber: '9000000714',
+        date: mondayDate,
+        bookedTime: '23:00',
+        bookingSource: 'WALK_IN',
+      }),
+    });
+    assert(
+      invalidSlotRes.status === 400,
+      `DM-R7-004: Out-of-hours slot time (23:00) rejected with 400 Bad Request (got ${invalidSlotRes.status})`
+    );
+
+    // Verify server-side rejection for double-booking occupied slot (11:00 is now booked)
+    const doubleBookWalkinRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        patientName: 'QA Duplicate Walkin Patient',
+        mobileNumber: '9000000715',
+        date: mondayDate,
+        bookedTime: '11:00',
+        bookingSource: 'WALK_IN',
+      }),
+    });
+    assert(
+      doubleBookWalkinRes.status === 409,
+      `DM-R7-004: Double-booking occupied slot 11:00 rejected with 409 Conflict (got ${doubleBookWalkinRes.status})`
+    );
+
+    // =========================================================================
+    // DM-R7-005: Same-minute emergency token collision resistance & tracker access
+    // =========================================================================
+    const emgLambdaRes = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        childName: 'QA Round7 Emergency Lambda',
+        parentName: 'QA Synthetic Guardian Lambda',
+        parentMobile: '9000000712',
+      }),
+    });
+    const emgLambdaData = await emgLambdaRes.json();
+    assert(emgLambdaRes.ok && emgLambdaData.success, 'DM-R7-005: Emergency Lambda insertion succeeds');
+    const tokenLambda = emgLambdaData.appointment.appointmentNumber;
+
+    // Insert second emergency patient within the exact same simulated minute
+    const emgXiRes = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        childName: 'QA Round7 Emergency Xi',
+        parentName: 'QA Synthetic Guardian Xi',
+        parentMobile: '9000000722',
+      }),
+    });
+    const emgXiData = await emgXiRes.json();
+    assert(emgXiRes.ok && emgXiData.success, 'DM-R7-005: Second emergency Xi insertion in same minute succeeds');
+    const tokenXi = emgXiData.appointment.appointmentNumber;
+
+    // Tokens must be distinct (collision-free)
+    assert(tokenLambda !== tokenXi, `DM-R7-005: Same-minute emergency appointments have distinct tokens (Lambda=${tokenLambda}, Xi=${tokenXi})`);
+    assert(tokenXi.includes('-2') || tokenXi !== tokenLambda, `DM-R7-005: Second emergency token has unique suffix (${tokenXi})`);
+
+    // Verify both patients can track securely with their respective mobile numbers
+    const trackLambdaRes = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${tokenLambda}&mobileNumber=9000000712`);
+    const trackLambdaData = await trackLambdaRes.json();
+    assert(trackLambdaRes.ok && trackLambdaData.success, 'DM-R7-005: Lambda tracks successfully with 9000000712');
+    assert(trackLambdaData.childName === 'QA Round7 Emergency Lambda', 'DM-R7-005: Lambda tracker displays Lambda');
+
+    const trackXiRes = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${tokenXi}&mobileNumber=9000000722`);
+    const trackXiData = await trackXiRes.json();
+    assert(trackXiRes.ok && trackXiData.success, 'DM-R7-005: Xi tracks successfully with 9000000722 without security rejection');
+    assert(trackXiData.childName === 'QA Round7 Emergency Xi', 'DM-R7-005: Xi tracker displays Xi');
+
+    // =========================================================================
+    // DM-R7-006: Applying doctor delay retains delay and is not discarded on refresh
+    // =========================================================================
+    // Apply +15m delay to Dr. QA Meridian Revised
+    const delay15Res = await fetch(`${baseUrl}/reception/doctor-delay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        date: emgDate,
+        delayMinutes: 15,
+        explanation: 'Doctor delayed by 15 minutes due to hospital rounds',
+      }),
+    });
+    const delay15Data = await delay15Res.json();
+    assert(delay15Res.ok && delay15Data.success, 'DM-R7-006: Applied +15m doctor delay via /reception/doctor-delay');
+    assert(delay15Data.currentDelayMinutes === 15, `DM-R7-006: Response reflects 15m delay (got ${delay15Data.currentDelayMinutes})`);
+
+    // Simulate "Refresh Queue" (/queue/live) where queue recalculation executes
+    const refreshQueueRes = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${docMeridianId}`);
+    const refreshQueueData = await refreshQueueRes.json();
+    assert(refreshQueueRes.ok, 'DM-R7-006: Live queue refresh succeeds');
+    assert(
+      refreshQueueData.session?.currentDelayMinutes === 15,
+      `DM-R7-006: Doctor delay remains 15 min after recalculation and Refresh Queue (got ${refreshQueueData.session?.currentDelayMinutes})`
+    );
+
+    // Verify patient live tracker reflects the 15m doctor delay
+    const trackXiDelayRes = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${tokenXi}&mobileNumber=9000000722`);
+    const trackXiDelayData = await trackXiDelayRes.json();
+    assert(trackXiDelayRes.ok && trackXiDelayData.success, 'DM-R7-006: Patient tracker query succeeds');
+    assert(
+      trackXiDelayData.estimatedDelayMinutes === 15,
+      `DM-R7-006: Patient tracker reflects 15m doctor delay (got ${trackXiDelayData.estimatedDelayMinutes})`
+    );
+
+    // =========================================================================
+    // Step 13: QA Round 7 Extended Retest (DM-R7-007, DM-R7-008, DM-R7-009, DM-R7-010)
+    // =========================================================================
+    console.log('\n--- Step 13: QA Round 7 Extended Retest (DM-R7-007, DM-R7-008, DM-R7-009, DM-R7-010) ---');
+
+    // -------------------------------------------------------------------------
+    // DM-R7-007: Two simultaneous consultations for one doctor rejected
+    // -------------------------------------------------------------------------
+    const alphaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        patientName: 'QA R7 Deep Alpha',
+        mobileNumber: '9000000731',
+        patientAge: 4,
+        date: emgDate,
+        bookedTime: '12:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const alphaData = await alphaRes.json();
+    assert(alphaRes.ok && alphaData.success, 'DM-R7-007: Alpha booking succeeds');
+
+    const betaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        branchId: 'main',
+        patientName: 'QA R7 Deep Beta',
+        mobileNumber: '9000000732',
+        patientAge: 5,
+        date: emgDate,
+        bookedTime: '13:00',
+        bookingSource: 'WALK_IN',
+      }),
+    });
+    const betaData = await betaRes.json();
+    assert(betaRes.ok && betaData.success, 'DM-R7-007: Beta booking succeeds');
+
+    // Check in Alpha and Beta
+    await fetch(`${baseUrl}/reception/check-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: alphaData.appointment.id, paymentMethod: 'CASH' }),
+    });
+    await fetch(`${baseUrl}/reception/check-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: betaData.appointment.id, paymentMethod: 'CASH' }),
+    });
+
+    // Start Alpha consultation
+    const sendAlphaRes = await fetch(`${baseUrl}/reception/send-to-doctor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: alphaData.appointment.id }),
+    });
+    const sendAlphaData = await sendAlphaRes.json();
+    assert(sendAlphaRes.ok && sendAlphaData.success, 'DM-R7-007: Alpha sent into consultation room');
+
+    // Attempt to start Beta consultation while Alpha is WITH_DOCTOR
+    const sendBetaConflictRes = await fetch(`${baseUrl}/reception/send-to-doctor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: betaData.appointment.id }),
+    });
+    const sendBetaConflictData = await sendBetaConflictRes.json();
+    assert(
+      sendBetaConflictRes.status === 409 || !sendBetaConflictData.success,
+      `DM-R7-007: Concurrent consultation attempt rejected with 409 (got status ${sendBetaConflictRes.status})`
+    );
+
+    // Live queue check: Alpha WITH_DOCTOR, Beta WAITING
+    const queueCheckRes = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${docMeridianId}`);
+    const queueCheckData = await queueCheckRes.json();
+    const betaInQueue = queueCheckData.appointments.find((a: any) => a.id === betaData.appointment.id);
+    assert(betaInQueue.status === 'WAITING', `DM-R7-007: Beta remains in WAITING status (got ${betaInQueue.status})`);
+    assert(queueCheckData.currentPatient.id === alphaData.appointment.id, 'DM-R7-007: Authoritative currentPatient is Alpha');
+
+    // Complete Alpha consultation
+    const completeAlphaRes = await fetch(`${baseUrl}/reception/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: alphaData.appointment.id }),
+    });
+    assert(completeAlphaRes.ok, 'DM-R7-007: Alpha consultation completed successfully');
+
+    // Beta can now be admitted
+    const sendBetaSuccessRes = await fetch(`${baseUrl}/reception/send-to-doctor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: betaData.appointment.id }),
+    });
+    const sendBetaSuccessData = await sendBetaSuccessRes.json();
+    assert(sendBetaSuccessRes.ok && sendBetaSuccessData.success, 'DM-R7-007: Beta admitted after Alpha completed');
+
+    await fetch(`${baseUrl}/reception/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: betaData.appointment.id }),
+    });
+
+    // -------------------------------------------------------------------------
+    // DM-R7-008: Emergency buffer boundary - 0 buffer does not jump back to 20
+    // -------------------------------------------------------------------------
+    const freshDocRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        name: 'Dr. QA Horizon Buffer Control',
+        specialty: 'Pediatric Care',
+        qualification: 'MBBS, MD',
+        experienceYears: 10,
+        contactNumber: '9000000788',
+        branches: ['main'],
+        slotDurationMinutes: 15,
+        workingDays: [1, 2, 3, 4, 5, 6],
+        startTime: '09:00',
+        endTime: '17:00',
+        bufferMinutesPerHour: 20,
+      }),
+    });
+    const freshDocData = await freshDocRes.json();
+    const freshDocId = freshDocData.doctor.id;
+
+    // First emergency consumes 15 min buffer -> 5 min left
+    const emg1Res = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: freshDocId,
+        branchId: 'main',
+        childName: 'QA R7 Deep Emergency One',
+        parentName: 'Parent Emg One',
+        parentMobile: '9000000733',
+      }),
+    });
+    assert(emg1Res.ok, 'DM-R7-008: Emergency One inserted successfully');
+
+    const queueEmg1Res = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${freshDocId}`);
+    const queueEmg1Data = await queueEmg1Res.json();
+    assert(
+      queueEmg1Data.session?.bufferAvailableMinutes === 5,
+      `DM-R7-008: Buffer correctly decremented from 20 to 5 (got ${queueEmg1Data.session?.bufferAvailableMinutes})`
+    );
+
+    // Second emergency consumes remaining 5 min buffer -> strictly 0 min left
+    const emg2Res = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: freshDocId,
+        branchId: 'main',
+        childName: 'QA R7 Deep Emergency Two',
+        parentName: 'Parent Emg Two',
+        parentMobile: '9000000734',
+      }),
+    });
+    assert(emg2Res.ok, 'DM-R7-008: Emergency Two inserted successfully');
+
+    const queueEmg2Res = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${freshDocId}`);
+    const queueEmg2Data = await queueEmg2Res.json();
+    assert(
+      queueEmg2Data.session?.bufferAvailableMinutes === 0,
+      `DM-R7-008: Buffer at boundary is strictly 0 and did NOT jump back to 20 (got ${queueEmg2Data.session?.bufferAvailableMinutes})`
+    );
+
+    // -------------------------------------------------------------------------
+    // DM-R7-009: Rescheduling / Reception Edit Bypasses Availability
+    // -------------------------------------------------------------------------
+    const gammaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: freshDocId,
+        branchId: 'main',
+        patientName: 'QA R7 Deep Gamma',
+        mobileNumber: '9000000735',
+        patientAge: 6,
+        date: emgDate,
+        bookedTime: '14:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const gammaData = await gammaRes.json();
+    const gammaId = gammaData.appointment?.id;
+    assert(gammaRes.ok && gammaData.success, 'DM-R7-009: Gamma booking at 14:00 succeeds');
+
+    const deltaRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: freshDocId,
+        branchId: 'main',
+        patientName: 'QA R7 Deep Delta',
+        mobileNumber: '9000000736',
+        patientAge: 7,
+        date: emgDate,
+        bookedTime: '15:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const deltaData = await deltaRes.json();
+    assert(deltaRes.ok && deltaData.success, 'DM-R7-009: Delta booking at 15:00 succeeds');
+
+    // Attempt 1: Edit Gamma to 15:00 (which Delta occupies) -> must reject with 409 Conflict
+    const editConflictRes = await fetch(`${baseUrl}/appointments/${gammaId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookedTime: '15:00',
+      }),
+    });
+    const editConflictData = await editConflictRes.json();
+    assert(
+      editConflictRes.status === 409 || !editConflictData.success,
+      `DM-R7-009: Rescheduling to occupied slot 15:00 rejected with 409 Conflict (got status ${editConflictRes.status})`
+    );
+
+    // Attempt 2: Edit Gamma to 18:00 (outside doctor schedule 09:00-17:00) -> must reject with 400 Bad Request
+    const editOutOfRangeRes = await fetch(`${baseUrl}/appointments/${gammaId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookedTime: '18:00',
+      }),
+    });
+    const editOutOfRangeData = await editOutOfRangeRes.json();
+    assert(
+      editOutOfRangeRes.status === 400 || !editOutOfRangeData.success,
+      `DM-R7-009: Rescheduling outside offered range (18:00) rejected with 400 Bad Request (got status ${editOutOfRangeRes.status})`
+    );
+
+    // Attempt 3: Edit Gamma child details while retaining 14:00 -> succeeds
+    const editValidRes = await fetch(`${baseUrl}/appointments/${gammaId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        childName: 'QA R7 Deep Gamma Verified',
+        bookedTime: '14:00',
+      }),
+    });
+    const editValidData = await editValidRes.json();
+    assert(editValidRes.ok && editValidData.success, 'DM-R7-009: Valid appointment update succeeds');
+
+    // -------------------------------------------------------------------------
+    // DM-R7-010: Cash check-in reactivates cancellation guard
+    // -------------------------------------------------------------------------
+    const cancelGammaRes = await fetch(`${baseUrl}/reception/cancel-appointment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appointmentId: gammaId,
+        reason: 'Patient requested cancellation',
+      }),
+    });
+    const cancelGammaData = await cancelGammaRes.json();
+    assert(cancelGammaRes.ok && cancelGammaData.success, 'DM-R7-010: Gamma cancelled successfully');
+
+    // Check tracker reflects HOSPITAL_CANCELLED and isTerminal=true
+    const gammaTrackRes = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${gammaData.appointment.appointmentNumber}&mobileNumber=9000000735`);
+    const gammaTrackData = await gammaTrackRes.json();
+    assert(gammaTrackData.status === 'HOSPITAL_CANCELLED', 'DM-R7-010: Tracker reflects HOSPITAL_CANCELLED');
+    assert(gammaTrackData.isTerminal === true, 'DM-R7-010: Cancelled appointment has isTerminal=true');
+
+    // Attempt cash check-in for cancelled Gamma -> must reject with 400
+    const cancelledCheckInRes = await fetch(`${baseUrl}/reception/check-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appointmentId: gammaId,
+        paymentMethod: 'CASH',
+      }),
+    });
+    const cancelledCheckInData = await cancelledCheckInRes.json();
+    assert(
+      cancelledCheckInRes.status === 400 || !cancelledCheckInData.success,
+      `DM-R7-010: Cash check-in on cancelled appointment rejected with 400 (got status ${cancelledCheckInRes.status})`
+    );
+
+    // Live queue verifies Gamma remains HOSPITAL_CANCELLED and not in queue
+    const queueGammaCheckRes = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${freshDocId}`);
+    const queueGammaCheckData = await queueGammaCheckRes.json();
+    const gammaInQueue = queueGammaCheckData.appointments.find((a: any) => a.id === gammaId);
+    assert(
+      gammaInQueue.status === 'HOSPITAL_CANCELLED',
+      `DM-R7-010: Gamma remains HOSPITAL_CANCELLED in live queue (got status ${gammaInQueue.status})`
+    );
+    assert(
+      gammaInQueue.isNextInQueue === false || !gammaInQueue.isNextInQueue,
+      'DM-R7-010: Cancelled Gamma is NOT next in queue'
+    );
+
+    // =========================================================================
+    // Step 14: QA Round 7 Post-Fix Revalidation (DM-R7-011, DM-R7-012, DM-R7-013)
+    // =========================================================================
+    console.log('\n--- Step 14: QA Round 7 Post-Fix Retest (DM-R7-011, DM-R7-012, DM-R7-013) ---');
+
+    // -------------------------------------------------------------------------
+    // DM-R7-011: In-consultation patient suppresses future arrival advice
+    // -------------------------------------------------------------------------
+    // Create an emergency appointment for docMeridianId
+    const emgTrackPatientRes = await fetch(`${baseUrl}/reception/emergency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: docMeridianId,
+        childName: 'QA R7 InChamber Child',
+        parentName: 'QA Parent',
+        parentMobile: '9000000743',
+        patientAge: 3,
+        reason: 'Acute respiratory distress',
+      }),
+    });
+    const emgTrackPatientData = await emgTrackPatientRes.json();
+    assert(emgTrackPatientRes.ok && emgTrackPatientData.success, 'DM-R7-011: Emergency patient admitted');
+    const emgAppt = emgTrackPatientData.appointment;
+
+    // Send in patient to doctor
+    const sendInRes = await fetch(`${baseUrl}/reception/send-to-doctor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: emgAppt.id }),
+    });
+    const sendInData = await sendInRes.json();
+    assert(sendInRes.ok && sendInData.success, 'DM-R7-011: Patient sent in to doctor');
+
+    // Track patient with mobile 9000000743
+    const inChamberTrackRes = await fetch(
+      `${baseUrl}/appointments/secure-track?appointmentId=${emgAppt.appointmentNumber}&mobileNumber=9000000743`
+    );
+    const inChamberTrackData = await inChamberTrackRes.json();
+    assert(inChamberTrackRes.ok && inChamberTrackData.success, 'DM-R7-011: Secure track succeeds for patient in chamber');
+    assert(inChamberTrackData.status === 'WITH_DOCTOR', 'DM-R7-011: Status is WITH_DOCTOR');
+    assert(
+      inChamberTrackData.recommendedArrivalTime === null,
+      `DM-R7-011: Reach Clinic By / arrival advice is SUPPRESSED (null) while inside consultation chamber (got ${inChamberTrackData.recommendedArrivalTime})`
+    );
+    assert(
+      inChamberTrackData.patientsAhead === 0,
+      `DM-R7-011: Patients ahead is 0 while patient is in chamber (got ${inChamberTrackData.patientsAhead})`
+    );
+    assert(
+      inChamberTrackData.estimatedConsultationTime === inChamberTrackData.consultationStartTime,
+      `DM-R7-011: Estimated consultation time reflects actual consultation start time (${inChamberTrackData.consultationStartTime})`
+    );
+
+    // Complete in-chamber consultation to free the doctor
+    await fetch(`${baseUrl}/reception/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: emgAppt.id }),
+    });
+
+    // -------------------------------------------------------------------------
+    // DM-R7-012: Reassignment respects requested estimated consultation time
+    // -------------------------------------------------------------------------
+    // Create dedicated doctor for DM-R7-012 and DM-R7-013 matching QA environment
+    const horizonDocRes = await fetch(`${baseUrl}/hospital-admin/${auroraId}/doctors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        name: 'Dr. QA Horizon Synthetic',
+        specialty: 'Pediatric Care',
+        qualification: 'MBBS, MD',
+        experienceYears: 12,
+        contactNumber: '9000000789',
+        branches: ['main'],
+        slotDurationMinutes: 30,
+        workingDays: [1, 2, 3, 4, 5, 6],
+        startTime: '09:00',
+        endTime: '17:00',
+        bufferMinutesPerHour: 20,
+      }),
+    });
+    const horizonDocData = await horizonDocRes.json();
+    const horizonDocId = horizonDocData.doctor.id;
+
+    // Book Delta at 14:00 with Horizon doctor
+    const delta14Res = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: horizonDocId,
+        branchId: 'main',
+        patientName: 'QA Delta Reassign',
+        mobileNumber: '9000000746',
+        patientAge: 6,
+        date: emgDate,
+        bookedTime: '14:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const delta14Data = await delta14Res.json();
+    assert(delta14Res.ok && delta14Data.success, 'DM-R7-012: Delta booked at 14:00');
+    const deltaId = delta14Data.appointment.id;
+    const deltaToken = delta14Data.appointment.appointmentNumber;
+
+    // Mark Delta late
+    const markLateRes = await fetch(`${baseUrl}/reception/mark-late`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: deltaId }),
+    });
+    const markLateData = await markLateRes.json();
+    assert(markLateRes.ok && markLateData.success, 'DM-R7-012: Delta marked late');
+
+    // Reassign Delta to 15:00
+    const reassign15Res = await fetch(`${baseUrl}/reception/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appointmentId: deltaId,
+        newExpectedTime: '15:00',
+      }),
+    });
+    const reassign15Data = await reassign15Res.json();
+    assert(reassign15Res.ok && reassign15Data.success, 'DM-R7-012: Reassignment to 15:00 succeeds');
+
+    // Verify in live queue that Delta's ETA is strictly 15:00 (not overwritten to 14:30)
+    const queue15Res = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${horizonDocId}`);
+    const queue15Data = await queue15Res.json();
+    const deltaInQueue15 = queue15Data.appointments.find((a: any) => a.id === deltaId);
+    assert(
+      deltaInQueue15.expectedConsultationTime === '15:00',
+      `DM-R7-012: Reassigned ETA 15:00 is respected in live queue (got ${deltaInQueue15?.expectedConsultationTime})`
+    );
+
+    // Verify in secure tracker that ETA is 15:00 and Reach Clinic By is 14:45
+    const track15Res = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${deltaToken}&mobileNumber=9000000746`);
+    const track15Data = await track15Res.json();
+    assert(
+      track15Data.estimatedConsultationTime === '15:00',
+      `DM-R7-012: Tracker ETA is 15:00 (got ${track15Data.estimatedConsultationTime})`
+    );
+    assert(
+      track15Data.recommendedArrivalTime === '14:45',
+      `DM-R7-012: Tracker Reach Clinic By is 14:45 (got ${track15Data.recommendedArrivalTime})`
+    );
+
+    // Reassign Delta second time to 16:00
+    const reassign16Res = await fetch(`${baseUrl}/reception/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appointmentId: deltaId,
+        newExpectedTime: '16:00',
+      }),
+    });
+    const reassign16Data = await reassign16Res.json();
+    assert(reassign16Res.ok && reassign16Data.success, 'DM-R7-012: Reassignment to 16:00 succeeds');
+
+    // Verify in live queue that Delta's ETA is 16:00
+    const queue16Res = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=${emgDate}&doctorId=${horizonDocId}`);
+    const queue16Data = await queue16Res.json();
+    const deltaInQueue16 = queue16Data.appointments.find((a: any) => a.id === deltaId);
+    assert(
+      deltaInQueue16.expectedConsultationTime === '16:00',
+      `DM-R7-012: Reassigned ETA 16:00 is respected in live queue (got ${deltaInQueue16?.expectedConsultationTime})`
+    );
+
+    // Verify in tracker that ETA is 16:00 and Reach Clinic By is 15:45
+    const track16Res = await fetch(`${baseUrl}/appointments/secure-track?appointmentId=${deltaToken}&mobileNumber=9000000746`);
+    const track16Data = await track16Res.json();
+    assert(
+      track16Data.estimatedConsultationTime === '16:00',
+      `DM-R7-012: Tracker ETA is 16:00 (got ${track16Data.estimatedConsultationTime})`
+    );
+    assert(
+      track16Data.recommendedArrivalTime === '15:45',
+      `DM-R7-012: Tracker Reach Clinic By is 15:45 (got ${track16Data.recommendedArrivalTime})`
+    );
+
+    // -------------------------------------------------------------------------
+    // DM-R7-013: No-show release releases booking capacity and allows reuse of slot
+    // -------------------------------------------------------------------------
+    // Mark Delta as NO_SHOW
+    const noShowDeltaRes = await fetch(`${baseUrl}/reception/no-show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: deltaId }),
+    });
+    const noShowDeltaData = await noShowDeltaRes.json();
+    assert(noShowDeltaRes.ok && noShowDeltaData.success, 'DM-R7-013: Delta marked NO_SHOW');
+
+    // Slot 14:00 (Delta's original booked slot) must now be available in slots query
+    const slotsAfterNoShowRes = await fetch(
+      `${baseUrl}/slots?doctorId=${horizonDocId}&date=${emgDate}&branchId=main`
+    );
+    const slotsAfterNoShowData = await slotsAfterNoShowRes.json();
+    const slot14 = (Array.isArray(slotsAfterNoShowData) ? slotsAfterNoShowData : slotsAfterNoShowData.slots)?.find((s: any) => s.time === '14:00');
+    assert(
+      slot14 && slot14.available === true,
+      `DM-R7-013: Slot 14:00 is available for new booking after NO_SHOW release (available: ${slot14?.available})`
+    );
+
+    // Rebook the 14:00 released slot with a new patient
+    const rebook14Res = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: horizonDocId,
+        branchId: 'main',
+        patientName: 'QA Delta Replacement',
+        mobileNumber: '9000000748',
+        patientAge: 7,
+        date: emgDate,
+        bookedTime: '14:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const rebook14Data = await rebook14Res.json();
+    assert(
+      rebook14Res.ok && rebook14Data.success,
+      `DM-R7-013: Rebooking previously released NO_SHOW slot 14:00 succeeds (status ${rebook14Res.status})`
+    );
+    assert(
+      rebook14Data.appointment.appointmentNumber.endsWith('-2') || rebook14Data.appointment.appointmentNumber.includes('-'),
+      `DM-R7-013: Rebooked slot gets unique incremental suffix token (got ${rebook14Data.appointment.appointmentNumber})`
+    );
+
+    // -------------------------------------------------------------------------
+    // DM-R7-014: Date/Data Consistency on Queue Query and Reload
+    // -------------------------------------------------------------------------
+    console.log('\n--- Step 15: QA Round 7 Defect DM-R7-014 Retest (Date/Data Consistency) ---');
+
+    // Set simulation date to 2026-10-21
+    const setDateRes = await fetch(`${baseUrl}/simulation/set-date`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: '2026-10-21' }),
+    });
+    const setDateData = await setDateRes.json();
+    assert(setDateRes.ok && setDateData.newDate === '2026-10-21', 'DM-R7-014: Simulation date updated to 2026-10-21');
+
+    // Query queue for 2026-10-21
+    const queue21Res = await fetch(`${baseUrl}/queue/live?hospitalId=${auroraId}&date=2026-10-21&doctorId=${horizonDocId}`);
+    const queue21Data = await queue21Res.json();
+    assert(queue21Data.targetDate === '2026-10-21', `DM-R7-014: /queue/live targetDate matches requested date 2026-10-21 (got ${queue21Data.targetDate})`);
+    assert(queue21Data.requestedDate === '2026-10-21', `DM-R7-014: /queue/live requestedDate is 2026-10-21 (got ${queue21Data.requestedDate})`);
+
+    // Ensure all returned appointments strictly match 2026-10-21
+    const hasWrongDateRows = queue21Data.appointments.some((a: any) => a.date !== '2026-10-21');
+    assert(!hasWrongDateRows, 'DM-R7-014: No wrong-date appointments leaked into 2026-10-21 queue response');
+
+    // Book a 2026-10-21 appointment at 12:00
+    const book21Res = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: horizonDocId,
+        branchId: 'main',
+        patientName: 'QA R7 Date Test Patient',
+        mobileNumber: '9000000789',
+        patientAge: 5,
+        date: '2026-10-21',
+        bookedTime: '12:00',
+        bookingSource: 'WALK_IN',
+      }),
+    });
+    const book21Data = await book21Res.json();
+    assert(book21Res.ok && book21Data.success, 'DM-R7-014: Booking on 2026-10-21 succeeds');
+
+    // Slots query for 2026-10-21 shows 12:00 occupied (available: false)
+    const slots21Res = await fetch(`${baseUrl}/slots?doctorId=${horizonDocId}&branchId=main&date=2026-10-21`);
+    const slots21Data = await slots21Res.json();
+    const slot21_1200 = (Array.isArray(slots21Data) ? slots21Data : slots21Data.slots)?.find((s: any) => s.time === '12:00');
+    assert(slot21_1200 && slot21_1200.available === false, 'DM-R7-014: 12:00 slot on 2026-10-21 is unavailable (occupied)');
+
+    // Slots query for another date (e.g. 2026-10-22) shows 12:00 is free (available: true)
+    const slots22Res = await fetch(`${baseUrl}/slots?doctorId=${horizonDocId}&branchId=main&date=2026-10-22`);
+    const slots22Data = await slots22Res.json();
+    const slot22_1200 = (Array.isArray(slots22Data) ? slots22Data : slots22Data.slots)?.find((s: any) => s.time === '12:00');
+    assert(slot22_1200 && slot22_1200.available === true, 'DM-R7-014: 12:00 slot on 2026-10-22 remains available (date isolation)');
+
+    // -------------------------------------------------------------------------
+    // DM-R7-015: Immediate slot availability after no-show following reassignment
+    // -------------------------------------------------------------------------
+    console.log('\n--- Step 15b: QA Round 7 Defect DM-R7-015 Retest (Released Slot Immediate Availability) ---');
+
+    // Setup: Book Gamma at 14:00 with Horizon doctor on 2026-10-22
+    const testDateR7 = '2026-10-22';
+    const gammaR7Res = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: horizonDocId,
+        branchId: 'main',
+        patientName: 'QA Gamma Precondition',
+        mobileNumber: '9000000755',
+        patientAge: 8,
+        date: testDateR7,
+        bookedTime: '14:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const gammaR7Data = await gammaR7Res.json();
+    assert(gammaR7Res.ok && gammaR7Data.success, 'DM-R7-015: Gamma booked at 14:00 on 2026-10-22');
+    const gammaApptId = gammaR7Data.appointment.id;
+
+    // 14:00 slot is occupied
+    const slotsBeforeNoShowRes = await fetch(`${baseUrl}/slots?doctorId=${horizonDocId}&branchId=main&date=${testDateR7}&_t=${Date.now()}`);
+    const slotsBeforeNoShowData = await slotsBeforeNoShowRes.json();
+    const slot14Occupied = (Array.isArray(slotsBeforeNoShowData) ? slotsBeforeNoShowData : slotsBeforeNoShowData.slots)?.find((s: any) => s.time === '14:00');
+    assert(slot14Occupied && slot14Occupied.available === false, 'DM-R7-015: 14:00 slot is initially occupied by Gamma');
+
+    // Mark Gamma late and reassign to 16:00
+    await fetch(`${baseUrl}/reception/mark-late`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: gammaApptId }),
+    });
+    const reassignGammaRes = await fetch(`${baseUrl}/reception/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: gammaApptId, newExpectedTime: '16:00' }),
+    });
+    assert(reassignGammaRes.ok, 'DM-R7-015: Gamma reassigned to 16:00');
+
+    // Mark Gamma NO_SHOW
+    const noShowGammaRes = await fetch(`${baseUrl}/reception/no-show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appointmentId: gammaApptId }),
+    });
+    const noShowGammaData = await noShowGammaRes.json();
+    assert(noShowGammaRes.ok && noShowGammaData.success, 'DM-R7-015: Gamma marked terminal NO_SHOW');
+
+    // Immediate slot query without reload (simulating immediate form open with cache-invalidation headers)
+    const immediateSlotsRes = await fetch(`${baseUrl}/slots?doctorId=${horizonDocId}&branchId=main&date=${testDateR7}&_t=${Date.now()}`);
+    assert(immediateSlotsRes.headers.get('cache-control')?.includes('no-store'), 'DM-R7-015: /slots endpoint includes Cache-Control: no-store header');
+    const immediateSlotsData = await immediateSlotsRes.json();
+    const slot14Released = (Array.isArray(immediateSlotsData) ? immediateSlotsData : immediateSlotsData.slots)?.find((s: any) => s.time === '14:00');
+    assert(slot14Released && slot14Released.available === true, 'DM-R7-015: Released 14:00 slot is immediately available without server or page reload');
+
+    // Immediate rebooking of released slot 14:00 with fresh Delta details without reload
+    const deltaRebookRes = await fetch(`${baseUrl}/reception/phone-booking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        hospitalId: auroraId,
+        doctorId: horizonDocId,
+        branchId: 'main',
+        patientName: 'QA Delta Immediate Rebook',
+        mobileNumber: '9000000756',
+        patientAge: 4,
+        date: testDateR7,
+        bookedTime: '14:00',
+        bookingSource: 'RECEPTION_PHONE',
+      }),
+    });
+    const deltaRebookData = await deltaRebookRes.json();
+    assert(deltaRebookRes.ok && deltaRebookData.success, 'DM-R7-015: Fresh Delta details successfully rebook 14:00 immediately without reload');
+    assert(
+      deltaRebookData.appointment.appointmentNumber.includes('-'),
+      `DM-R7-015: Rebooked appointment has distinct incremental suffix token (${deltaRebookData.appointment.appointmentNumber})`
+    );
+
+    // -------------------------------------------------------------------------
+    // Step 16: PIN Code Auto-Detection for Hospital Registration
+    // -------------------------------------------------------------------------
+    console.log('\n--- Step 16: PIN Code Auto-Detection for Hospital Registration ---');
+
+    // 1. Query PIN 533001 (Andhra Pradesh / East Godavari / Kakinada)
+    const pinAPRes = await fetch(`${baseUrl}/pincode/533001`);
+    const pinAPData = await pinAPRes.json();
+    assert(pinAPRes.ok && pinAPData.success, 'Step 16: Pincode query for 533001 succeeds');
+    assert(pinAPData.state === 'Andhra Pradesh', `Step 16: 533001 resolves to Andhra Pradesh (got ${pinAPData.state})`);
+    assert(Boolean(pinAPData.city || pinAPData.district), 'Step 16: 533001 returns city/district');
+    assert(Array.isArray(pinAPData.places) && pinAPData.places.length > 0, 'Step 16: 533001 returns localities array');
+
+    // 2. Query PIN 560001 (Karnataka / Bengaluru)
+    const pinKA = await (await fetch(`${baseUrl}/pincode/560001`)).json();
+    assert(pinKA.success && pinKA.state === 'Karnataka', `Step 16: 560001 resolves to Karnataka (got ${pinKA.state})`);
+
+    // 3. Query PIN 110001 (Delhi)
+    const pinDL = await (await fetch(`${baseUrl}/pincode/110001`)).json();
+    assert(pinDL.success && pinDL.state === 'Delhi', `Step 16: 110001 resolves to Delhi (got ${pinDL.state})`);
+
+    // 4. Repeated query uses cache (<50ms)
+    const t0 = Date.now();
+    const pinCached = await (await fetch(`${baseUrl}/pincode/533001`)).json();
+    const duration = Date.now() - t0;
+    assert(pinCached.success && duration < 100, `Step 16: Cached pincode query responds instantaneously (${duration}ms)`);
+
+    // 5. Invalid PIN length rejects with 400
+    const pinInvalidRes = await fetch(`${baseUrl}/pincode/1234`);
+    assert(pinInvalidRes.status === 400, 'Step 16: Non-6-digit PIN rejected with 400 Bad Request');
+
+    // 6. Register hospital using auto-detected pincode
+    const uniqueAdminEmail = `pinadmin_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@test.com`;
+    const regHospRes = await fetch(`${baseUrl}/hospitals/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'QA Pincode Verified Hospital',
+        address: 'Main Hospital Road',
+        city: pinAPData.city,
+        state: pinAPData.state,
+        pincode: '533001',
+        phone: '9000000799',
+        hospitalType: 'Multispeciality Hospital',
+        adminName: 'Dr. QA Pincode Admin',
+        adminEmail: uniqueAdminEmail,
+        adminMobile: '9000000799',
+        password: 'password123',
+      }),
+    });
+    const regHospData = await regHospRes.json();
+    assert(regHospRes.ok && regHospData.token, 'Step 16: Hospital registers successfully with auto-detected PIN fields');
+    assert(regHospData.hospital.pincode === '533001', 'Step 16: Registered hospital retains pincode 533001');
+    assert(regHospData.hospital.state === 'Andhra Pradesh', 'Step 16: Registered hospital retains auto-detected state');
+
+    // Restore clock back to today
+    await fetch(`${baseUrl}/simulation/set-date`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: '2026-10-19' }),
+    });
+
   } catch (err) {
     console.error('Test execution failed with error:', err);
     failed++;

@@ -178,6 +178,7 @@ export interface Appointment {
   date: string; // YYYY-MM-DD
   bookedTime: string; // "10:30"
   expectedConsultationTime: string; // "10:42" dynamically updated
+  reassignedTime?: string; // Explicit reassignment time set by reception desk (e.g. "15:00")
   recommendedArrivalTime: string; // "10:27" (15m before expected)
   status: AppointmentStatus;
   paymentStatus: PaymentStatus;
@@ -216,10 +217,14 @@ export interface DoctorSession {
   status: 'NOT_STARTED' | 'IN_SESSION' | 'ON_BREAK' | 'COMPLETED' | 'CANCELLED_BY_HOSPITAL';
   currentAppointmentId?: string;
   currentDelayMinutes: number;
+  manualDelayMinutes?: number;
   avgConsultationDurationMinutes: number;
   bufferAvailableMinutes: number;
   emergencyAdjustmentCount: number;
   cancellationNotice?: string;
+  delayReason?: string;
+  delayType?: 'LATE_START' | 'BREAK' | 'OVERRUN' | 'GENERAL';
+  estimatedAvailabilityTime?: string;
 }
 
 export interface SlotAvailability {

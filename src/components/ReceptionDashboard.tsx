@@ -28,6 +28,7 @@ import {
   UserCheck,
   UserX,
   X,
+  XCircle,
   ChevronRight,
   TrendingUp,
   Sliders,
@@ -80,16 +81,26 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
     return branches.filter((b) => (b.hospitalId || 'hosp_sdch') === receptionUser.hospitalId);
   }, [branches, receptionUser?.hospitalId]);
 
+  const parseTimeToMinutes = (t?: string): number => {
+    if (!t) return 0;
+    const [h, m] = t.split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  };
+
   const [selectedBranchId, setSelectedBranchId] = useState<BranchId>(
     receptionUser.branchId || (hospitalBranches[0]?.id || 'main')
   );
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('all');
-  const [selectedDateFilter, setSelectedDateFilter] = useState<string>(config.simulatedDate);
+  const [selectedDateFilter, setSelectedDateFilter] = useState<string>(() => {
+    const cached = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null;
+    return cached || config.simulatedDate || new Date().toLocaleDateString('en-CA');
+  });
   const [isAllDates, setIsAllDates] = useState<boolean>(false);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState<'ALL' | 'PHONE' | 'ONLINE' | 'WALK_IN' | 'OTHER'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [queueData, setQueueData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const activeQueueRequestDateRef = React.useRef<string>('');
 
   useEffect(() => {
     if (hospitalBranches.length > 0 && !hospitalBranches.some((b) => b.id === selectedBranchId)) {
@@ -109,6 +120,13 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [showReassignModal, setShowReassignModal] = useState<Appointment | null>(null);
   const [showCancelSessionModal, setShowCancelSessionModal] = useState(false);
+  const [showDoctorLateModal, setShowDoctorLateModal] = useState(false);
+  const [doctorDelayMinutes, setDoctorDelayMinutes] = useState(15);
+  const [doctorDelayType, setDoctorDelayType] = useState<'LATE_START' | 'BREAK' | 'CONSULTATION_OVERRUN'>('LATE_START');
+  const [doctorDelayReason, setDoctorDelayReason] = useState<string>('');
+  const [doctorDelayDoctorId, setDoctorDelayDoctorId] = useState('');
+  const [cancelApptModal, setCancelApptModal] = useState<Appointment | null>(null);
+  const [cancelApptReason, setCancelApptReason] = useState('Patient requested cancellation');
   const [showBlockedModal, setShowBlockedModal] = useState(false);
   const [blockedParentsList, setBlockedParentsList] = useState<any[]>([]);
   const [unblockModalParent, setUnblockModalParent] = useState<any | null>(null);
@@ -121,6 +139,12 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   const [unblockJustification, setUnblockJustification] = useState<string>('');
   const [unblockLoading, setUnblockLoading] = useState<boolean>(false);
   const [actionMessage, setActionMessage] = useState<string>('');
+
+  // Track availability version to invalidate and synchronize slot availability across reception actions
+  const [slotAvailabilityVersion, setSlotAvailabilityVersion] = useState(0);
+  const invalidateSlotAvailability = () => {
+    setSlotAvailabilityVersion((v) => v + 1);
+  };
 
   // Phone booking form state
   const [parentMobileSearch, setParentMobileSearch] = useState('');
@@ -222,19 +246,30 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
     fetchAllParents();
     fetchBlockedParents();
     if (config?.simulatedDate) {
-      setSelectedDateFilter(config.simulatedDate);
+      setSelectedDateFilter((prev) => {
+        if (prev !== config.simulatedDate) {
+          setLoading(true);
+          return config.simulatedDate;
+        }
+        return prev;
+      });
       setPhoneBookingDate(config.simulatedDate);
     }
   }, [config?.simulatedDate]);
 
   const fetchLiveQueue = async () => {
+    const dateParam = isAllDates ? 'all' : selectedDateFilter;
+    activeQueueRequestDateRef.current = dateParam;
     try {
-      const dateParam = isAllDates ? 'all' : selectedDateFilter;
       const hospParam = receptionUser.hospitalId ? `&hospitalId=${receptionUser.hospitalId}` : '';
       const res = await fetch(
         `/api/queue/live?doctorId=${selectedDoctorId}&branchId=${selectedBranchId}&date=${dateParam}${hospParam}`
       );
       const data = await res.json();
+      // Drop response if user/system switched to another date before this request returned
+      if (activeQueueRequestDateRef.current !== dateParam) {
+        return;
+      }
       setQueueData(data);
       if (
         onConfigUpdate &&
@@ -251,7 +286,9 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (activeQueueRequestDateRef.current === dateParam) {
+        setLoading(false);
+      }
     }
   };
 
@@ -276,7 +313,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         showToast(`Payment received via ${paymentMethod === 'PHONEPE' ? 'PhonePe / UPI' : 'Cash'} & patient checked in.`);
         setCheckInModalAppt(null);
         setCheckInHeight('');
@@ -284,6 +321,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         setCheckInTemp('');
         setCheckInPulse('');
         fetchLiveQueue();
+      } else {
+        alert(data.message || 'Failed to process check-in / payment.');
       }
     } catch (err) {
       console.error(err);
@@ -298,9 +337,11 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         body: JSON.stringify({ appointmentId: apptId }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         showToast('Patient sent into consultation room with doctor.');
         fetchLiveQueue();
+      } else {
+        alert(data.message || 'Cannot send patient to doctor.');
       }
     } catch (err) {
       console.error(err);
@@ -358,6 +399,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         setShowReassignModal(null);
         setReassignTime('');
         fetchLiveQueue();
+        invalidateSlotAvailability();
       }
     } catch (err) {
       console.error(err);
@@ -383,6 +425,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         fetchLiveQueue();
         fetchBlockedParents();
         fetchAllParents();
+        invalidateSlotAvailability();
       }
     } catch (err) {
       console.error(err);
@@ -427,11 +470,16 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
   const handleEmergencySubmit = async () => {
     if (!emergencyChildName.trim()) return;
     try {
+      const effectiveDoctorId = selectedDoctorId !== 'all' 
+        ? selectedDoctorId 
+        : (hospitalDoctors[0]?.id || 'dr-subba-rao');
+
       const res = await fetch('/api/reception/emergency', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          doctorId: selectedDoctorId,
+          hospitalId: receptionUser.hospitalId,
+          doctorId: effectiveDoctorId,
           branchId: selectedBranchId,
           childName: emergencyChildName.trim(),
           parentName: emergencyParentName.trim() || 'Emergency Attendant',
@@ -446,6 +494,62 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         setEmergencyParentName('');
         setEmergencyParentMobile('');
         fetchLiveQueue();
+        invalidateSlotAvailability();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDoctorDelaySubmit = async () => {
+    try {
+      const targetDocId = doctorDelayDoctorId || (selectedDoctorId !== 'all' ? selectedDoctorId : hospitalDoctors[0]?.id || 'dr-subba-rao');
+      const res = await fetch('/api/reception/doctor-delay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hospitalId: receptionUser.hospitalId || 'hosp_sdch',
+          doctorId: targetDocId,
+          branchId: selectedBranchId,
+          delayMinutes: doctorDelayMinutes,
+          delayType: doctorDelayType,
+          explanation: doctorDelayReason.trim() || undefined,
+          date: selectedDateFilter,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`Doctor delay of +${doctorDelayMinutes}m logged. Downstream queue recalculated.`);
+        setShowDoctorLateModal(false);
+        setDoctorDelayReason('');
+        fetchLiveQueue();
+      } else {
+        showToast(data.error || 'Failed to apply doctor delay.');
+      }
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Error applying doctor delay.');
+    }
+  };
+
+  const handleCancelAppointmentSubmit = async (appointmentId: string, reason?: string) => {
+    try {
+      const res = await fetch('/api/reception/cancel-appointment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appointmentId,
+          reason: reason || cancelApptReason,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Appointment cancelled successfully. Slot freed.');
+        setCancelApptModal(null);
+        fetchLiveQueue();
+        invalidateSlotAvailability();
+      } else {
+        showToast(data.message || 'Failed to cancel appointment');
       }
     } catch (err) {
       console.error(err);
@@ -460,6 +564,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         body: JSON.stringify({
           doctorId: selectedDoctorId,
           branchId: selectedBranchId,
+          date: selectedDateFilter,
           reason: cancelReason,
         }),
       });
@@ -468,6 +573,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         showToast(`Doctor session cancelled. ${data.affectedCount} parents notified.`);
         setShowCancelSessionModal(false);
         fetchLiveQueue();
+        invalidateSlotAvailability();
       }
     } catch (err) {
       console.error(err);
@@ -673,6 +779,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
         showToast('Appointment and patient details updated successfully!');
         setEditingAppt(null);
         fetchLiveQueue();
+        invalidateSlotAvailability();
       } else {
         alert(data.message || 'Failed to update appointment');
       }
@@ -683,10 +790,22 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
     }
   };
 
-  const session = queueData?.session as DoctorSession | undefined;
-  const currentPatient = queueData?.currentPatient as Appointment | undefined;
-  const nextPatient = queueData?.nextPatient as Appointment | undefined;
-  const appointments = (queueData?.appointments as Appointment[]) || [];
+  // Check if queueData is synchronized with the currently requested date
+  const isDataDateSynchronized = Boolean(
+    queueData && (isAllDates ? !queueData.targetDate || queueData.requestedDate === 'all' : (queueData.targetDate || queueData.requestedDate) === selectedDateFilter)
+  );
+
+  const session = isDataDateSynchronized ? (queueData?.session as DoctorSession | undefined) : undefined;
+  const currentPatient = isDataDateSynchronized ? (queueData?.currentPatient as Appointment | undefined) : undefined;
+  const nextPatient = isDataDateSynchronized ? (queueData?.nextPatient as Appointment | undefined) : undefined;
+
+  const appointments = useMemo(() => {
+    if (!queueData) return [];
+    const rawList = (queueData.appointments as Appointment[]) || [];
+    if (isAllDates) return rawList;
+    // Strict date filter: ensure no wrong-date records are ever displayed
+    return rawList.filter((a) => !a.date || a.date === selectedDateFilter);
+  }, [queueData, isAllDates, selectedDateFilter]);
 
   const realTodayStr = new Date().toLocaleDateString('en-CA');
   const todayDateStr = config.simulatedDate || realTodayStr;
@@ -734,6 +853,30 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
       (appt.doctorName && appt.doctorName.toLowerCase().includes(q))
     );
   });
+
+  // Section 8: Live Operational Bar metrics
+  const currentElapsedMinutes = (currentPatient && currentPatient.consultationStartTime && config.simulatedTime)
+    ? Math.max(0, parseTimeToMinutes(config.simulatedTime) - parseTimeToMinutes(currentPatient.consultationStartTime))
+    : 0;
+
+  let docLiveStatus = 'Available';
+  let docLiveStatusBg = 'bg-teal-100 text-teal-800 border-teal-300';
+  if (currentPatient) {
+    docLiveStatus = 'Consulting';
+    docLiveStatusBg = 'bg-emerald-100 text-emerald-800 border-emerald-300 animate-pulse';
+  } else if (session?.delayType === 'BREAK') {
+    docLiveStatus = 'On Break';
+    docLiveStatusBg = 'bg-amber-100 text-amber-900 border-amber-300';
+  } else if (session?.delayType === 'LATE_START') {
+    docLiveStatus = 'Late Arrival';
+    docLiveStatusBg = 'bg-amber-100 text-amber-900 border-amber-300';
+  } else if (!session?.actualStart) {
+    docLiveStatus = 'Not Started';
+    docLiveStatusBg = 'bg-slate-100 text-slate-700 border-slate-300';
+  }
+
+  const arrivedCount = appointments.filter((a) => ['WAITING', 'ARRIVED', 'WITH_DOCTOR'].includes(a.status)).length;
+  const upcomingCount = appointments.filter((a) => ['BOOKED', 'APPROACHING'].includes(a.status)).length;
 
   return (
     <div className="min-h-screen bg-slate-100/70 pb-20 pt-6">
@@ -814,6 +957,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             <button
               id="rec-phone-booking-btn"
               onClick={() => {
+                invalidateSlotAvailability();
                 setShowPhoneBookingModal(true);
                 handleLoadPhoneSlots();
               }}
@@ -830,6 +974,18 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             >
               <Zap className="w-3.5 h-3.5" />
               <span>Emergency Adjustment</span>
+            </button>
+
+            <button
+              id="rec-doctor-late-btn"
+              onClick={() => {
+                setDoctorDelayDoctorId(selectedDoctorId !== 'all' ? selectedDoctorId : hospitalDoctors[0]?.id || '');
+                setShowDoctorLateModal(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>Doctor Late Arrival</span>
             </button>
 
             <button
@@ -1033,14 +1189,14 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/60">
               <span className="text-[11px] text-slate-500 block">Waiting:</span>
               <strong className="text-slate-900 text-sm font-mono">
-                {queueData?.waitingCount || 0}
+                {isDataDateSynchronized ? (queueData?.waitingCount || 0) : '—'}
               </strong>
             </div>
 
             <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/60">
               <span className="text-[11px] text-slate-500 block">Remaining:</span>
               <strong className="text-slate-900 text-sm font-mono">
-                {queueData?.remainingCount || 0}
+                {isDataDateSynchronized ? (queueData?.remainingCount || 0) : '—'}
               </strong>
             </div>
 
@@ -1054,7 +1210,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200">
               <span className="text-[11px] text-amber-800 block">Buffer Avail:</span>
               <strong className="text-amber-900 text-sm font-mono">
-                {session?.bufferAvailableMinutes || 20} min
+                {session?.bufferAvailableMinutes !== undefined ? session.bufferAvailableMinutes : 20} min
               </strong>
             </div>
           </div>
@@ -1107,7 +1263,13 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 <button
                   id="rec-send-next-btn"
                   onClick={() => handleSendToDoctor(nextPatient.id)}
-                  className="px-3 py-1.5 bg-sky-700 hover:bg-sky-800 text-white rounded-xl text-xs font-semibold"
+                  disabled={Boolean(currentPatient)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                    currentPatient
+                      ? 'bg-slate-200 text-slate-400 cursor-not-allowed border border-slate-300'
+                      : 'bg-sky-700 hover:bg-sky-800 text-white cursor-pointer shadow-xs'
+                  }`}
+                  title={currentPatient ? `Doctor is currently consulting ${currentPatient.childName}` : 'Send next patient in'}
                 >
                   Send In
                 </button>
@@ -1130,6 +1292,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 onClick={() => {
                   setSelectedDateFilter(todayDateStr);
                   setIsAllDates(false);
+                  setLoading(true);
                 }}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer border ${
                   !isAllDates && selectedDateFilter === todayDateStr
@@ -1146,6 +1309,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 onClick={() => {
                   setSelectedDateFilter(tomorrowDateStr);
                   setIsAllDates(false);
+                  setLoading(true);
                 }}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer border ${
                   !isAllDates && selectedDateFilter === tomorrowDateStr
@@ -1163,6 +1327,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                   onClick={() => {
                     setSelectedDateFilter(realTodayStr);
                     setIsAllDates(false);
+                    setLoading(true);
                   }}
                   className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer border ${
                     !isAllDates && selectedDateFilter === realTodayStr
@@ -1180,6 +1345,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 id="rec-date-btn-all"
                 onClick={() => {
                   setIsAllDates(true);
+                  setLoading(true);
                 }}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer border ${
                   isAllDates
@@ -1201,6 +1367,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                     if (e.target.value) {
                       setSelectedDateFilter(e.target.value);
                       setIsAllDates(false);
+                      setLoading(true);
                     }
                   }}
                   className="px-2.5 py-1 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-800 focus:outline-none focus:border-teal-500"
@@ -1344,8 +1511,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
               <Activity className="w-4 h-4 text-teal-600" />
               <span>
-                Patient Consultations ({filteredAppointments.length}
-                {filteredAppointments.length !== appointments.length && ` of ${appointments.length}`}
+                Patient Consultations ({isDataDateSynchronized ? filteredAppointments.length : '...'}
+                {isDataDateSynchronized && filteredAppointments.length !== appointments.length && ` of ${appointments.length}`}
                 {isAllDates ? ' Total Future' : ` on ${selectedDateFilter}`})
               </span>
             </h3>
@@ -1354,8 +1521,76 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
             </span>
           </div>
 
+          {/* Section 8: Doctor Operational Status & Queue Comparison Bar */}
+          <div className="p-4 rounded-2xl bg-slate-50/90 border border-slate-200/80 space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Doctor Status</span>
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md font-bold text-xs mt-1 border ${docLiveStatusBg}`}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-current"></span>
+                  <span>{docLiveStatus}</span>
+                </span>
+              </div>
+
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Current Patient</span>
+                <strong className="text-slate-900 font-bold block truncate mt-1 text-xs">
+                  {currentPatient ? `${currentPatient.childName} (${currentElapsedMinutes}m)` : 'Chamber Free'}
+                </strong>
+                {currentPatient && (
+                  <span className="text-[10px] text-teal-700 block font-mono">Started: {currentPatient.consultationStartTime || 'Recently'}</span>
+                )}
+              </div>
+
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Est. Next Availability</span>
+                <span className="font-mono font-bold text-teal-900 block mt-1 text-sm">
+                  {session?.estimatedAvailabilityTime || '—'}
+                </span>
+                <span className="text-[10px] text-slate-400 block">Queue calculated</span>
+              </div>
+
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Arrived Patients Waiting</span>
+                <span className="font-bold text-teal-800 block mt-1 text-sm font-mono">
+                  {arrivedCount}
+                </span>
+                <span className="text-[10px] text-teal-600 block font-medium">Checked in at hospital</span>
+              </div>
+
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Upcoming (Not Arrived)</span>
+                <span className="font-bold text-slate-700 block mt-1 text-sm font-mono">
+                  {upcomingCount}
+                </span>
+                <span className="text-[10px] text-slate-400 block">Tracking from home</span>
+              </div>
+
+              <div className="p-2.5 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-semibold">Staff Delay Reason</span>
+                <span className="text-slate-800 font-medium block truncate mt-1 text-xs" title={session?.delayReason || 'None recorded'}>
+                  {session?.delayReason || 'None recorded'}
+                </span>
+                <span className="text-[10px] text-slate-400 block">Entered by staff</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-200/60">
+              <span className="italic">Reception comparison queue — individual delays calculated from queue capacity &amp; protected gaps</span>
+              <span className="font-mono">Last successful update: {queueData?.simulatedTime || config.simulatedTime || 'Live'}</span>
+            </div>
+          </div>
+
           <div className="space-y-3">
-            {filteredAppointments.length === 0 ? (
+            {(!isDataDateSynchronized || (loading && !queueData)) ? (
+              <div id="rec-queue-sync-loading" className="py-16 text-center space-y-3 bg-slate-50/80 rounded-2xl border border-slate-200">
+                <RefreshCw className="w-8 h-8 text-teal-600 animate-spin mx-auto" />
+                <div className="font-bold text-slate-800 text-sm">
+                  Synchronizing Queue for {isAllDates ? 'All Dates' : selectedDateFilter}...
+                </div>
+                <p className="text-xs text-slate-500">Retrieving operational doctor consultations and live patient radar.</p>
+              </div>
+            ) : filteredAppointments.length === 0 ? (
               <div className="py-12 text-center space-y-2 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
                 <UserX className="w-8 h-8 text-slate-400 mx-auto" />
                 <div className="font-bold text-slate-700 text-sm">No patient appointments found</div>
@@ -1381,6 +1616,17 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 const isCompleted = appt.status === 'COMPLETED';
                 const isLate = appt.status === 'LATE';
                 const isNoShow = appt.status === 'NO_SHOW';
+                const isCancelled =
+                  appt.status === 'HOSPITAL_CANCELLED' ||
+                  appt.status === 'SLOT_RELEASED' ||
+                  (appt.status as any) === 'CANCELLED' ||
+                  appt.status === 'RESCHEDULED';
+                const isTerminal = isCompleted || isNoShow || isCancelled;
+
+                // DM-R7-007: Check if doctor is already consulting another patient
+                const isDoctorBusyWithOther = appointments.some(
+                  (a) => a.doctorId === appt.doctorId && a.date === appt.date && a.status === 'WITH_DOCTOR' && a.id !== appt.id
+                );
 
                 const parentObj = allParents.find(
                   (p) => p.id === appt.parentId || p.mobile === appt.parentMobile
@@ -1403,6 +1649,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                         ? 'bg-amber-50/60 border-amber-300'
                         : isNoShow
                         ? 'bg-rose-50/60 border-rose-200 opacity-60'
+                        : isCancelled
+                        ? 'bg-rose-50/40 border-rose-200 opacity-60 text-slate-500'
                         : 'bg-white border-slate-200 hover:border-slate-300'
                     }`}
                   >
@@ -1460,28 +1708,83 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                       </div>
                     </div>
 
-                  {/* Times Breakdown (Booked vs Expected vs Status) */}
+                  {/* Times Breakdown & Section 8 Comparison Columns (Booked vs Expected vs Individual Delay vs Arrival Status vs Consultation Status) */}
                   <div className="flex flex-wrap items-center gap-4 text-xs">
                     <div>
-                      <span className="text-[10px] text-slate-400 block uppercase">Booked:</span>
+                      <span className="text-[10px] text-slate-400 block uppercase font-medium">Booked:</span>
                       <span className="font-mono font-bold text-slate-800">{appt.bookedTime}</span>
                     </div>
 
                     <div>
                       <span className="text-[10px] text-teal-700 block uppercase font-bold">Expected:</span>
                       <span className="font-mono font-bold text-teal-900 text-sm">
-                        {appt.isNextInQueue || appt.positionInQueue === 1 ? (
-                          <span className="bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md font-bold text-xs uppercase tracking-wide">
-                            Next in Queue
+                        {isTerminal ? (
+                          <span className="text-slate-400 italic text-xs">
+                            {appt.status.replace('_', ' ')}
+                          </span>
+                        ) : appt.isNextInQueue || appt.positionInQueue === 1 ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md font-bold text-xs uppercase tracking-wide">
+                              Next in Queue
+                            </span>
+                            <span className="text-teal-900 font-mono font-bold text-sm">
+                              ({appt.expectedConsultationTime || appt.bookedTime})
+                            </span>
                           </span>
                         ) : (
-                          appt.expectedConsultationTime
+                          appt.expectedConsultationTime || appt.bookedTime
                         )}
                       </span>
                     </div>
 
+                    {/* Individual Delay (PDF Section 8 Comparison) */}
                     <div>
-                      <span className="text-[10px] text-slate-400 block uppercase">Payment:</span>
+                      <span className="text-[10px] text-slate-400 block uppercase font-medium">Individual Delay:</span>
+                      {(() => {
+                        if (isTerminal) {
+                          return <span className="text-slate-400 text-xs">—</span>;
+                        }
+                        const bMin = parseTimeToMinutes(appt.bookedTime);
+                        const eMin = parseTimeToMinutes(appt.expectedConsultationTime || appt.bookedTime);
+                        const diff = eMin - bMin;
+                        if (diff > 0) {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md font-mono font-bold text-xs bg-amber-100 text-amber-900 border border-amber-300">
+                              +{diff} min
+                            </span>
+                          );
+                        } else if (diff < 0) {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md font-mono font-bold text-xs bg-cyan-100 text-cyan-900 border border-cyan-300">
+                              {diff} min
+                            </span>
+                          );
+                        } else {
+                          return (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md font-bold text-xs bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              On schedule
+                            </span>
+                          );
+                        }
+                      })()}
+                    </div>
+
+                    {/* Arrival Status (PDF Section 8 Comparison) */}
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase font-medium">Arrival Status:</span>
+                      {['WAITING', 'ARRIVED', 'WITH_DOCTOR', 'COMPLETED'].includes(appt.status) ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md font-bold text-[11px] bg-teal-100 text-teal-800 border border-teal-300">
+                          ✓ Arrived
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md font-medium text-[11px] bg-slate-100 text-slate-600 border border-slate-200">
+                          Not arrived
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] text-slate-400 block uppercase font-medium">Payment:</span>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span
                           className={`font-semibold ${
@@ -1505,7 +1808,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                     </div>
 
                     <div>
-                      <span className="text-[10px] text-slate-400 block uppercase">Status:</span>
+                      <span className="text-[10px] text-slate-400 block uppercase font-medium">Consultation Status:</span>
                       <span className="px-2 py-0.5 rounded-lg bg-white border border-slate-200 text-[11px] font-bold text-slate-800">
                         {appt.status.replace('_', ' ')}
                       </span>
@@ -1532,8 +1835,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                       </button>
                     )}
 
-                    {/* EDIT DETAILS BUTTON (Available until patient is sent to doctor) */}
-                    {!isWithDoctor && !isCompleted && !isNoShow && appt.status !== 'HOSPITAL_CANCELLED' && appt.status !== 'SLOT_RELEASED' && (
+                    {/* EDIT DETAILS BUTTON (Available until patient is sent to doctor and not terminal) */}
+                    {!isTerminal && !isWithDoctor && (
                       <button
                         id={`btn-edit-${appt.id}`}
                         onClick={() => openEditModal(appt)}
@@ -1545,8 +1848,8 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                       </button>
                     )}
 
-                    {/* 1. CHECK IN / PAYMENT RECEIVED */}
-                    {appt.paymentStatus === 'PENDING' && !isCompleted && !isNoShow && (
+                    {/* 1. CHECK IN / PAYMENT RECEIVED (Suppressed for terminal/cancelled appointments) */}
+                    {appt.paymentStatus === 'PENDING' && !isTerminal && (
                       <button
                         id={`btn-checkin-${appt.id}`}
                         onClick={() => setCheckInModalAppt(appt)}
@@ -1557,12 +1860,22 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                       </button>
                     )}
 
-                    {/* 2. SEND TO DOCTOR */}
-                    {isWaiting && (
+                    {/* 2. SEND TO DOCTOR (Enforces 1-active-consultation per doctor) */}
+                    {isWaiting && !isTerminal && (
                       <button
                         id={`btn-send-${appt.id}`}
                         onClick={() => handleSendToDoctor(appt.id)}
-                        className="px-3.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-xs flex items-center gap-1 shadow-2xs transition"
+                        disabled={isDoctorBusyWithOther}
+                        className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 shadow-2xs transition ${
+                          isDoctorBusyWithOther
+                            ? 'bg-slate-200 text-slate-400 cursor-not-allowed border border-slate-300'
+                            : 'bg-sky-600 hover:bg-sky-700 text-white cursor-pointer'
+                        }`}
+                        title={
+                          isDoctorBusyWithOther
+                            ? 'Doctor is currently consulting another patient. Complete current consultation first.'
+                            : 'Send to Doctor'
+                        }
                       >
                         <UserCheck className="w-3.5 h-3.5" />
                         <span>Send to Doctor</span>
@@ -1582,7 +1895,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                     )}
 
                     {/* 4. MARK LATE */}
-                    {isBooked && (
+                    {isBooked && !isTerminal && (
                       <button
                         id={`btn-late-${appt.id}`}
                         onClick={() => handleMarkLate(appt.id)}
@@ -1594,7 +1907,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                     )}
 
                     {/* 5. REASSIGN POSITION */}
-                    {(isLate || isWaiting) && (
+                    {(isLate || isWaiting) && !isTerminal && (
                       <button
                         id={`btn-reassign-${appt.id}`}
                         onClick={() => setShowReassignModal(appt)}
@@ -1604,15 +1917,31 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                       </button>
                     )}
 
-                    {/* 6. NO-SHOW */}
-                    {!isCompleted && !isNoShow && (
+                    {/* 6. NO-SHOW (Suppressed for terminal/cancelled appointments) */}
+                    {!isTerminal && !isWithDoctor && (
                       <button
                         id={`btn-noshow-${appt.id}`}
                         onClick={() => handleNoShow(appt.id)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition"
+                        className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition cursor-pointer"
                         title="Release slot for no-show"
                       >
                         <UserX className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    {/* 7. CANCEL APPOINTMENT (Suppressed for terminal/cancelled appointments) */}
+                    {!isTerminal && !isWithDoctor && (
+                      <button
+                        id={`btn-cancel-${appt.id}`}
+                        onClick={() => {
+                          setCancelApptModal(appt);
+                          setCancelApptReason('Patient / Clinic requested cancellation');
+                        }}
+                        className="px-2.5 py-1 text-slate-500 hover:text-rose-700 hover:bg-rose-50 border border-slate-200 rounded-lg text-xs font-medium transition flex items-center gap-1 cursor-pointer"
+                        title="Cancel this appointment"
+                      >
+                        <X className="w-3.5 h-3.5 text-rose-500" />
+                        <span>Cancel</span>
                       </button>
                     )}
                   </div>
@@ -1630,11 +1959,17 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
           onClose={() => setShowPhoneBookingModal(false)}
           hospitalId={receptionUser.hospitalId || 'hosp_sdch'}
           hospitalName={receptionUser.hospitalName || 'Doctormate Hospital'}
-          doctors={doctors.filter((d) => !receptionUser.hospitalId || (d.hospitalId || 'hosp_sdch') === receptionUser.hospitalId)}
+          doctors={hospitalDoctors}
           selectedDoctorId={selectedDoctorId !== 'all' ? selectedDoctorId : undefined}
-          onBookingSuccess={() => {
+          defaultDate={selectedDateFilter || config.simulatedDate}
+          availabilityVersion={slotAvailabilityVersion}
+          onBookingSuccess={(src) => {
             fetchLiveQueue();
-            showToast('Telephone appointment confirmed successfully.');
+            if (src === 'WALK_IN') {
+              showToast('Walk-in appointment confirmed successfully.');
+            } else {
+              showToast('Telephone appointment confirmed successfully.');
+            }
           }}
         />
 
@@ -1900,24 +2235,30 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
 
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">Available Slot</label>
-                  <div className="grid grid-cols-3 gap-1.5 max-h-32 overflow-y-auto p-1">
-                    {phoneSlots.map((s) => (
-                      <button
-                        key={s.time}
-                        disabled={!s.available}
-                        onClick={() => setSelectedPhoneSlot(s.time)}
-                        className={`p-2 rounded-lg text-xs font-semibold text-center transition ${
-                          selectedPhoneSlot === s.time
-                            ? 'bg-teal-600 text-white'
-                            : s.available
-                            ? 'bg-teal-50 hover:bg-teal-100 text-teal-900 border border-teal-200'
-                            : 'bg-slate-100 text-slate-400 line-through opacity-50'
-                        }`}
-                      >
-                        {s.time}
-                      </button>
-                    ))}
-                  </div>
+                  {phoneSlots.length === 0 ? (
+                    <div className="py-4 px-2 text-center text-xs text-amber-700 bg-amber-50 rounded-xl border border-amber-200">
+                      Doctor is not scheduled on this date or has no open slots available.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-1.5 max-h-32 overflow-y-auto p-1">
+                      {phoneSlots.map((s) => (
+                        <button
+                          key={s.time}
+                          disabled={!s.available}
+                          onClick={() => setSelectedPhoneSlot(s.time)}
+                          className={`p-2 rounded-lg text-xs font-semibold text-center transition ${
+                            selectedPhoneSlot === s.time
+                              ? 'bg-teal-600 text-white'
+                              : s.available
+                              ? 'bg-teal-50 hover:bg-teal-100 text-teal-900 border border-teal-200'
+                              : 'bg-slate-100 text-slate-400 line-through opacity-50'
+                          }`}
+                        >
+                          {s.time}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2056,7 +2397,7 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                 <span>Hospital Caused Session Cancellation</span>
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
-                Cancels remaining appointments for today’s session and sends reassuring apologies to affected families. Will NOT be recorded as parent no-show.
+                Cancels remaining appointments for {selectedDateFilter === todayDateStr ? "today’s session" : selectedDateFilter === tomorrowDateStr ? "tomorrow’s session" : `session on ${selectedDateFilter}`} and sends reassuring apologies to affected families. Will NOT be recorded as parent no-show.
               </p>
 
               <div className="text-xs">
@@ -2082,6 +2423,222 @@ export const ReceptionDashboard: React.FC<ReceptionDashboardProps> = ({
                   className="flex-1 py-2 rounded-xl bg-rose-600 text-white text-xs font-semibold"
                 >
                   Confirm Hospital Cancellation
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Doctor Delay / Schedule Adjustment (PDF Section 8) */}
+        {showDoctorLateModal && (
+          <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl relative animate-in zoom-in-95">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-amber-600" />
+                  <span>Doctor Delay &amp; Schedule Adjustment</span>
+                </h3>
+                <button
+                  onClick={() => setShowDoctorLateModal(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-500">
+                Receptionist delay action clearly distinguishes schedule event types. Expected times will recalculate downstream without misleading default reasons.
+              </p>
+
+              <div className="space-y-3.5 text-xs">
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">Select Doctor</label>
+                  <select
+                    id="rec-doctor-delay-select"
+                    value={doctorDelayDoctorId || (selectedDoctorId !== 'all' ? selectedDoctorId : hospitalDoctors[0]?.id || '')}
+                    onChange={(e) => setDoctorDelayDoctorId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white"
+                  >
+                    {hospitalDoctors.map((doc) => (
+                      <option key={doc.id} value={doc.id}>
+                        {doc.name} ({doc.specialty})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Delay Event Type (PDF Section 8) */}
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1.5">Delay Event Type</label>
+                  <div className="grid grid-cols-1 gap-2">
+                    <label
+                      className={`p-2.5 rounded-xl border flex items-start gap-2.5 cursor-pointer transition ${
+                        doctorDelayType === 'LATE_START'
+                          ? 'border-amber-400 bg-amber-50/70 text-amber-950 ring-1 ring-amber-400'
+                          : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="rec-delay-type"
+                        checked={doctorDelayType === 'LATE_START'}
+                        onChange={() => setDoctorDelayType('LATE_START')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block text-xs">Doctor Late Start / Transit Delay</strong>
+                        <span className="text-[11px] text-slate-500">Doctor arrival delayed; session start pushed forward.</span>
+                      </div>
+                    </label>
+
+                    <label
+                      className={`p-2.5 rounded-xl border flex items-start gap-2.5 cursor-pointer transition ${
+                        doctorDelayType === 'BREAK'
+                          ? 'border-amber-400 bg-amber-50/70 text-amber-950 ring-1 ring-amber-400'
+                          : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="rec-delay-type"
+                        checked={doctorDelayType === 'BREAK'}
+                        onChange={() => setDoctorDelayType('BREAK')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block text-xs">Doctor Break / Intermission Now</strong>
+                        <span className="text-[11px] text-slate-500">Doctor taking a break/in-patient rounds between consultations.</span>
+                      </div>
+                    </label>
+
+                    <label
+                      className={`p-2.5 rounded-xl border flex items-start gap-2.5 cursor-pointer transition ${
+                        doctorDelayType === 'CONSULTATION_OVERRUN'
+                          ? 'border-amber-400 bg-amber-50/70 text-amber-950 ring-1 ring-amber-400'
+                          : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="rec-delay-type"
+                        checked={doctorDelayType === 'CONSULTATION_OVERRUN'}
+                        onChange={() => setDoctorDelayType('CONSULTATION_OVERRUN')}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <strong className="block text-xs">Current Consultation Needs More Time</strong>
+                        <span className="text-[11px] text-slate-500">Active consultation requires extended care before next patient.</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">Expected Delay (Minutes)</label>
+                  <select
+                    id="rec-doctor-delay-minutes-select"
+                    value={doctorDelayMinutes}
+                    onChange={(e) => setDoctorDelayMinutes(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white font-mono font-bold"
+                  >
+                    <option value={10}>+10 Minutes</option>
+                    <option value={15}>+15 Minutes (Standard)</option>
+                    <option value={20}>+20 Minutes</option>
+                    <option value={30}>+30 Minutes</option>
+                    <option value={45}>+45 Minutes</option>
+                  </select>
+                </div>
+
+                {/* Delay Reason entered by staff (PDF Section 6 & 8) */}
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Delay Reason (Entered by Staff)
+                  </label>
+                  <input
+                    type="text"
+                    id="rec-doctor-delay-reason-input"
+                    value={doctorDelayReason}
+                    onChange={(e) => setDoctorDelayReason(e.target.value)}
+                    placeholder="e.g. Traffic transit delay, IPD rounds, or Emergency stabilization"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white"
+                  />
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {[
+                      'Traffic transit delay',
+                      'Hospital in-patient rounds',
+                      'Critical patient stabilization',
+                      'Emergency case procedure',
+                    ].map((tag) => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => setDoctorDelayReason(tag)}
+                        className="text-[10px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition cursor-pointer"
+                      >
+                        + {tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 flex gap-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowDoctorLateModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="rec-submit-doctor-late-btn"
+                  type="button"
+                  onClick={handleDoctorDelaySubmit}
+                  className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-xs transition cursor-pointer"
+                >
+                  Apply Delay Adjustment
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Individual Appointment Cancellation */}
+        {cancelApptModal && (
+          <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl relative animate-in zoom-in-95">
+              <h3 className="font-bold text-rose-800 text-base flex items-center gap-2">
+                <XCircle className="w-5 h-5 text-rose-600" />
+                <span>Cancel Appointment</span>
+              </h3>
+              <p className="text-xs text-slate-600">
+                Cancel appointment for <strong>{cancelApptModal.childName}</strong> (Token #{cancelApptModal.appointmentNumber}). The slot will be released for other patients.
+              </p>
+
+              <div className="text-xs">
+                <label className="block text-slate-700 font-semibold mb-1">Cancellation Reason</label>
+                <input
+                  type="text"
+                  value={cancelApptReason}
+                  onChange={(e) => setCancelApptReason(e.target.value)}
+                  placeholder="e.g. Patient requested cancellation"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs"
+                />
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  onClick={() => setCancelApptModal(null)}
+                  className="flex-1 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs"
+                >
+                  Keep Booking
+                </button>
+                <button
+                  id="rec-confirm-cancel-appt-btn"
+                  onClick={() => handleCancelAppointmentSubmit(cancelApptModal.id, cancelApptReason)}
+                  className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold"
+                >
+                  Cancel Booking
                 </button>
               </div>
             </div>

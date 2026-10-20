@@ -12,6 +12,10 @@ import {
   ChevronRight,
   ArrowRight,
   Lock,
+  UserX,
+  XCircle,
+  Info,
+  Activity,
 } from 'lucide-react';
 
 interface SecureTrackerViewProps {
@@ -45,12 +49,18 @@ export const SecureTrackerView: React.FC<SecureTrackerViewProps> = ({
     patientName: string;
     date: string;
     scheduledTime: string;
+    bookedTime?: string;
     status: string;
     positionInQueue: number;
     patientsAhead: number;
+    consultationStartTime?: string;
     estimatedConsultationTime: string;
     estimatedDelayMinutes: number;
-    recommendedArrivalTime: string;
+    individualDelayMinutes?: number;
+    estimatedTimeRemainingMinutes?: number;
+    delayReason?: string;
+    isFutureAppointment?: boolean;
+    recommendedArrivalTime: string | null;
     lastUpdatedTime: string;
   } | null>(null);
 
@@ -130,6 +140,28 @@ export const SecureTrackerView: React.FC<SecureTrackerViewProps> = ({
             <span>Consultation Completed</span>
           </span>
         );
+      case 'NO_SHOW':
+        return (
+          <span className="px-3 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-800 flex items-center space-x-1.5">
+            <UserX className="w-3.5 h-3.5" />
+            <span>Slot Released (No-Show)</span>
+          </span>
+        );
+      case 'HOSPITAL_CANCELLED':
+      case 'CANCELLED':
+        return (
+          <span className="px-3 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-800 flex items-center space-x-1.5">
+            <XCircle className="w-3.5 h-3.5" />
+            <span>Appointment Cancelled</span>
+          </span>
+        );
+      case 'RESCHEDULED':
+        return (
+          <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-100 text-purple-800 flex items-center space-x-1.5">
+            <Calendar className="w-3.5 h-3.5" />
+            <span>Rescheduled</span>
+          </span>
+        );
       default:
         return (
           <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-800">
@@ -138,6 +170,8 @@ export const SecureTrackerView: React.FC<SecureTrackerViewProps> = ({
         );
     }
   };
+
+  const isTerminalStatus = ['NO_SHOW', 'HOSPITAL_CANCELLED', 'CANCELLED', 'COMPLETED', 'SLOT_RELEASED'].includes(trackingData?.status || '');
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8 animate-fadeIn">
@@ -246,78 +280,244 @@ export const SecureTrackerView: React.FC<SecureTrackerViewProps> = ({
             </div>
           </div>
 
-          {/* Main Queue Metrics Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="p-4 rounded-2xl bg-teal-50/60 border border-teal-100 text-center">
-              <span className="text-xs font-semibold text-teal-700 uppercase tracking-wider">
-                Your Token
-              </span>
-              <div className="text-2xl font-black text-teal-900 mt-1">
-                {trackingData.appointmentNumber}
+          {/* DM-R7-003: Render Status-Specific Content for Terminal Statuses vs Active Flow */}
+          {trackingData.status === 'NO_SHOW' ? (
+            <div className="p-6 bg-rose-50 border-2 border-rose-200 rounded-2xl space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold">
+                  <UserX className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-extrabold text-rose-900">
+                    Slot Released — Marked as No-Show
+                  </h4>
+                  <p className="text-xs text-rose-700">
+                    This appointment was marked as No-Show and the slot has been released.
+                  </p>
+                </div>
               </div>
-              <span className="text-[11px] text-teal-600 font-medium">Position #{trackingData.positionInQueue}</span>
+              <p className="text-sm text-rose-800 leading-relaxed bg-white/70 p-3 rounded-xl border border-rose-200">
+                You are no longer in the active queue for this doctor. Please do not proceed to the consultation room based on prior arrival advice. If you have arrived at the hospital, please approach the reception desk to request a same-day walk-in token or rebook your visit.
+              </p>
+              {onBookNew && (
+                <div className="pt-2">
+                  <button
+                    onClick={onBookNew}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl transition shadow flex items-center space-x-1.5"
+                  >
+                    <span>Book New Appointment</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
-
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-center">
-              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Patients Ahead
-              </span>
-              <div className="text-2xl font-black text-slate-900 mt-1">
-                {trackingData.patientsAhead}
+          ) : trackingData.status === 'HOSPITAL_CANCELLED' || trackingData.status === 'CANCELLED' ? (
+            <div className="p-6 bg-amber-50 border-2 border-amber-200 rounded-2xl space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
+                  <XCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-extrabold text-amber-900">
+                    Appointment Cancelled
+                  </h4>
+                  <p className="text-xs text-amber-700">
+                    This booking has been cancelled by the hospital desk or patient request.
+                  </p>
+                </div>
               </div>
-              <span className="text-[11px] text-slate-500 font-medium">Waiting ahead of you</span>
+              <p className="text-sm text-amber-800 leading-relaxed bg-white/70 p-3 rounded-xl border border-amber-200">
+                Active queue progression has stopped for this token. If you need to consult the doctor, please contact reception or book a new appointment slot for an upcoming session.
+              </p>
+              {onBookNew && (
+                <div className="pt-2">
+                  <button
+                    onClick={onBookNew}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition shadow flex items-center space-x-1.5"
+                  >
+                    <span>Book Replacement Appointment</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
-
-            <div className="p-4 rounded-2xl bg-amber-50/60 border border-amber-100 text-center">
-              <span className="text-xs font-semibold text-amber-700 uppercase tracking-wider">
-                Expected Time
-              </span>
-              <div className="text-2xl font-black text-amber-900 mt-1">
-                {trackingData.estimatedConsultationTime}
+          ) : trackingData.status === 'COMPLETED' ? (
+            <div className="p-6 bg-emerald-50 border-2 border-emerald-200 rounded-2xl space-y-3">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                  <CheckCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-extrabold text-emerald-900">
+                    Consultation Completed
+                  </h4>
+                  <p className="text-xs text-emerald-700">
+                    Your consultation with {trackingData.doctorName} has concluded.
+                  </p>
+                </div>
               </div>
-              <span className="text-[11px] text-amber-700 font-medium">
-                {trackingData.estimatedDelayMinutes > 0
-                  ? `+${trackingData.estimatedDelayMinutes}m Doctor Delay`
-                  : 'On Schedule'}
-              </span>
+              <p className="text-sm text-emerald-800 leading-relaxed bg-white/70 p-3 rounded-xl border border-emerald-200">
+                Thank you for choosing {trackingData.hospitalName}. Please collect any prescribed medicines from the pharmacy or visit the reception for your follow-up schedule.
+              </p>
             </div>
-
-            <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-100 text-center">
-              <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wider">
-                Reach Clinic By
-              </span>
-              <div className="text-2xl font-black text-emerald-900 mt-1">
-                {trackingData.recommendedArrivalTime}
+          ) : trackingData.status === 'WITH_DOCTOR' ? (
+            <div className="p-6 bg-emerald-50/80 border-2 border-emerald-300 rounded-2xl space-y-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                  <Activity className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <h4 className="text-base font-extrabold text-emerald-950">
+                    Currently Inside Consultation Chamber
+                  </h4>
+                  <p className="text-xs text-emerald-700">
+                    Your consultation with {trackingData.doctorName} is actively in progress.
+                  </p>
+                </div>
               </div>
-              <span className="text-[11px] text-emerald-600 font-medium">15 min buffer</span>
-            </div>
-          </div>
 
-          {/* Progress Radar */}
-          <div className="p-5 bg-slate-900 rounded-2xl text-white space-y-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-teal-400">Queue Flow Progress</span>
-              <span className="text-slate-400">Last updated: {trackingData.lastUpdatedTime}</span>
-            </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2">
+                <div className="p-3.5 bg-white rounded-xl border border-emerald-100 text-center shadow-xs">
+                  <span className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wider block">
+                    Your Token
+                  </span>
+                  <span className="text-xl font-black text-slate-900 mt-0.5 block">
+                    {trackingData.appointmentNumber}
+                  </span>
+                  <span className="text-[11px] text-emerald-600 font-medium">Inside Chamber</span>
+                </div>
 
-            <div className="w-full bg-slate-800 rounded-full h-3 overflow-hidden p-0.5 border border-slate-700">
-              <div
-                className="bg-gradient-to-r from-teal-400 to-emerald-400 h-full rounded-full transition-all duration-500 shadow-sm"
-                style={{
-                  width: `${Math.min(
-                    100,
-                    Math.max(15, 100 - trackingData.patientsAhead * 15)
-                  )}%`,
-                }}
-              ></div>
-            </div>
+                <div className="p-3.5 bg-white rounded-xl border border-emerald-100 text-center shadow-xs">
+                  <span className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wider block">
+                    Consultation Started
+                  </span>
+                  <span className="text-xl font-black text-emerald-700 mt-0.5 block">
+                    {trackingData.consultationStartTime || trackingData.estimatedConsultationTime || 'In Progress'}
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-medium">Active Chamber Call</span>
+                </div>
 
-            <div className="flex justify-between text-[11px] text-slate-400 pt-1">
-              <span>Appointment Booked</span>
-              <span>Checked-In At Hospital</span>
-              <span className="text-teal-300 font-bold">Doctor Chamber Call</span>
+                <div className="p-3.5 bg-white rounded-xl border border-emerald-100 text-center shadow-xs col-span-2 sm:col-span-1">
+                  <span className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wider block">
+                    Patients Ahead
+                  </span>
+                  <span className="text-xl font-black text-slate-900 mt-0.5 block">
+                    0
+                  </span>
+                  <span className="text-[11px] text-emerald-600 font-medium">Active Turn</span>
+                </div>
+              </div>
+
+              <p className="text-xs text-emerald-800 bg-white/80 p-3 rounded-xl border border-emerald-200">
+                You are currently inside the consultation chamber with the doctor. Arrival countdown instructions and advance notice have been concluded.
+              </p>
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Main Queue Metrics Cards for Active Appointments (PDF Section 1 & 7) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {/* 1. Booked Time (Preserved & visible) */}
+                <div className="p-4 rounded-2xl bg-white border border-slate-200 text-center shadow-xs">
+                  <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">
+                    Booked Slot
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black text-slate-900 mt-1 font-mono">
+                    {trackingData.scheduledTime || trackingData.bookedTime}
+                  </div>
+                  <span className="text-[11px] text-slate-400 font-medium">Original booked time</span>
+                </div>
+
+                {/* 2. Expected Consultation Time */}
+                <div className="p-4 rounded-2xl bg-teal-50/70 border border-teal-200 text-center shadow-xs">
+                  <span className="text-xs font-semibold text-teal-800 uppercase tracking-wider block">
+                    Expected Time
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black text-teal-950 mt-1 font-mono">
+                    {trackingData.estimatedConsultationTime}
+                  </div>
+                  <span className="text-[11px] text-teal-700 font-medium">Around {trackingData.estimatedConsultationTime}</span>
+                </div>
+
+                {/* 3. Individual Delay */}
+                <div className={`p-4 rounded-2xl border text-center shadow-xs ${
+                  (trackingData.individualDelayMinutes && trackingData.individualDelayMinutes > 0) || trackingData.estimatedDelayMinutes > 0
+                    ? 'bg-amber-50/80 border-amber-200 text-amber-950'
+                    : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                }`}>
+                  <span className="text-xs font-semibold uppercase tracking-wider block">
+                    Current Delay
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black mt-1 font-mono">
+                    {trackingData.individualDelayMinutes && trackingData.individualDelayMinutes > 0
+                      ? `+${trackingData.individualDelayMinutes} min`
+                      : trackingData.estimatedDelayMinutes > 0
+                      ? `+${trackingData.estimatedDelayMinutes} min`
+                      : 'On schedule'}
+                  </div>
+                  <span className="text-[11px] font-medium block">
+                    {trackingData.delayReason ? trackingData.delayReason : (
+                      (trackingData.individualDelayMinutes && trackingData.individualDelayMinutes > 0) || trackingData.estimatedDelayMinutes > 0
+                        ? `About ${trackingData.individualDelayMinutes || trackingData.estimatedDelayMinutes} minutes`
+                        : 'On schedule'
+                    )}
+                  </span>
+                </div>
+
+                {/* 4. Arrival Advice */}
+                <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200 text-center shadow-xs">
+                  <span className="text-xs font-semibold text-sky-800 uppercase tracking-wider block">
+                    Arrival Advice
+                  </span>
+                  <div className="text-lg sm:text-xl font-black text-sky-950 mt-1">
+                    {['WAITING', 'ARRIVED'].includes(trackingData.status)
+                      ? 'Checked In'
+                      : trackingData.recommendedArrivalTime
+                      ? trackingData.recommendedArrivalTime
+                      : 'On Time'}
+                  </div>
+                  <span className="text-[11px] text-sky-700 font-medium block">
+                    {['WAITING', 'ARRIVED'].includes(trackingData.status)
+                      ? 'Please wait for your call'
+                      : trackingData.recommendedArrivalTime
+                      ? '15 min buffer before expected'
+                      : 'At hospital on schedule'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Consultation notice */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-500">
+                <span className="italic">Consultation time may change as earlier visits finish.</span>
+                <span className="font-semibold text-slate-700">{trackingData.patientsAhead} patients ahead in queue</span>
+              </div>
+
+              {/* Progress Radar */}
+              <div className="p-5 bg-slate-900 rounded-2xl text-white space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-teal-400">Queue Flow Progress</span>
+                  <span className="text-slate-400">Last updated: {trackingData.lastUpdatedTime}</span>
+                </div>
+
+                <div className="w-full bg-slate-800 rounded-full h-3 overflow-hidden p-0.5 border border-slate-700">
+                  <div
+                    className="bg-gradient-to-r from-teal-400 to-emerald-400 h-full rounded-full transition-all duration-500 shadow-sm"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.max(15, 100 - trackingData.patientsAhead * 15)
+                      )}%`,
+                    }}
+                  ></div>
+                </div>
+
+                <div className="flex justify-between text-[11px] text-slate-400 pt-1">
+                  <span>Appointment Booked</span>
+                  <span>Checked-In At Hospital</span>
+                  <span className="text-teal-300 font-bold">Doctor Chamber Call</span>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Patient & Booking Details */}
           <div className="border border-slate-100 rounded-2xl p-5 bg-slate-50/50 space-y-3">

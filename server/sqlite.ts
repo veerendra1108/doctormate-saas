@@ -340,6 +340,7 @@ export class SqliteManager {
     ensureColumn('parents', 'blocked_at', 'TEXT');
     ensureColumn('parents', 'unblock_history_json', "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn('appointments', 'payment_method', 'TEXT');
+    ensureColumn('appointments', 'reassigned_time', 'TEXT');
     ensureColumn('appointments', 'height_cm', 'REAL');
     ensureColumn('appointments', 'weight_kg', 'REAL');
     ensureColumn('appointments', 'temperature_f', 'REAL');
@@ -603,7 +604,8 @@ export class SqliteManager {
           booking_source, advance_notice_preference_minutes, is_emergency, emergency_reason,
           actual_arrival_time, consultation_start_time, consultation_end_time,
           consultation_duration_minutes, delay_explanation, rescheduled_from_appointment_id,
-          position_in_queue, children_ahead, history_json, created_at, updated_at
+          position_in_queue, children_ahead, history_json, created_at, updated_at,
+          hospital_id, hospital_name, tracking_secret, patient_age, guardian_name
         ) VALUES (
           @id, @appointmentNumber, @childId, @childName, @parentId, @parentName, @parentMobile,
           @doctorId, @doctorName, @branchId, @branchName, @date, @bookedTime,
@@ -611,7 +613,8 @@ export class SqliteManager {
           @bookingSource, @advanceNoticePreferenceMinutes, @isEmergency, @emergencyReason,
           @actualArrivalTime, @consultationStartTime, @consultationEndTime,
           @consultationDurationMinutes, @delayExplanation, @rescheduledFromAppointmentId,
-          @positionInQueue, @childrenAhead, @historyJson, @createdAt, @updatedAt
+          @positionInQueue, @childrenAhead, @historyJson, @createdAt, @updatedAt,
+          @hospitalId, @hospitalName, @trackingSecret, @patientAge, @guardianName
         )
       `);
       for (const a of seed.appointments) {
@@ -649,6 +652,11 @@ export class SqliteManager {
           historyJson: JSON.stringify(a.history || []),
           createdAt: a.createdAt,
           updatedAt: a.updatedAt,
+          hospitalId: a.hospitalId || 'hosp_sdch',
+          hospitalName: a.hospitalName || null,
+          trackingSecret: a.trackingSecret || null,
+          patientAge: a.patientAge ?? null,
+          guardianName: a.guardianName || null,
         });
       }
 
@@ -675,7 +683,7 @@ export class SqliteManager {
           currentAppointmentId: ses.currentAppointmentId || null,
           currentDelayMinutes: ses.currentDelayMinutes || 0,
           avgConsultationDurationMinutes: ses.avgConsultationDurationMinutes || 15,
-          bufferAvailableMinutes: ses.bufferAvailableMinutes || 0,
+          bufferAvailableMinutes: ses.bufferAvailableMinutes !== undefined ? ses.bufferAvailableMinutes : 20,
           emergencyAdjustmentCount: ses.emergencyAdjustmentCount || 0,
           cancellationNotice: ses.cancellationNotice || null,
         });
@@ -1065,46 +1073,57 @@ export class SqliteManager {
 
     // Appointments
     const apptRows = this.db.prepare('SELECT * FROM appointments ORDER BY date ASC, booked_time ASC').all() as any[];
-    const appointments: Appointment[] = apptRows.map((a) => ({
-      id: a.id,
-      appointmentNumber: a.appointment_number,
-      childId: a.child_id,
-      childName: a.child_name,
-      parentId: a.parent_id,
-      parentName: a.parent_name,
-      parentMobile: a.parent_mobile,
-      doctorId: a.doctor_id,
-      doctorName: a.doctor_name,
-      branchId: a.branch_id,
-      branchName: a.branch_name,
-      date: a.date,
-      bookedTime: a.booked_time,
-      expectedConsultationTime: a.expected_consultation_time,
-      recommendedArrivalTime: a.recommended_arrival_time,
-      status: a.status,
-      paymentStatus: a.payment_status,
-      paymentMethod: a.payment_method || undefined,
-      bookingSource: a.booking_source,
-      advanceNoticePreferenceMinutes: a.advance_notice_preference_minutes,
-      isEmergency: a.is_emergency === 1,
-      emergencyReason: a.emergency_reason || undefined,
-      actualArrivalTime: a.actual_arrival_time || undefined,
-      consultationStartTime: a.consultation_start_time || undefined,
-      consultationEndTime: a.consultation_end_time || undefined,
-      consultationDurationMinutes: a.consultation_duration_minutes ?? undefined,
-      delayExplanation: a.delay_explanation || undefined,
-      rescheduledFromAppointmentId: a.rescheduled_from_appointment_id || undefined,
-      positionInQueue: a.position_in_queue ?? undefined,
-      childrenAhead: a.childrenAhead ?? a.children_ahead ?? undefined,
-      history: JSON.parse(a.history_json || '[]'),
-      createdAt: a.created_at,
-      updatedAt: a.updated_at,
-      hospitalId: a.hospital_id || 'hosp_sdch',
-      hospitalName: a.hospital_name || 'Apex Multi-Specialty Hospital',
-      trackingSecret: a.tracking_secret || undefined,
-      patientAge: a.patient_age ?? undefined,
-      guardianName: a.guardian_name || undefined,
-    }));
+    const appointments: Appointment[] = apptRows.map((a) => {
+      const doc = doctors.find((d) => d.id === a.doctor_id);
+      const effectiveHospitalId =
+        a.hospital_id && a.hospital_id !== 'hosp_sdch'
+          ? a.hospital_id
+          : (doc?.hospitalId || a.hospital_id || 'hosp_sdch');
+      const hosp = hospitals.find((h) => h.id === effectiveHospitalId);
+      const effectiveHospitalName = hosp?.name || a.hospital_name || 'Apex Multi-Specialty Hospital';
+
+      return {
+        id: a.id,
+        appointmentNumber: a.appointment_number,
+        childId: a.child_id,
+        childName: a.child_name,
+        parentId: a.parent_id,
+        parentName: a.parent_name,
+        parentMobile: a.parent_mobile,
+        doctorId: a.doctor_id,
+        doctorName: a.doctor_name,
+        branchId: a.branch_id,
+        branchName: a.branch_name,
+        date: a.date,
+        bookedTime: a.booked_time,
+        reassignedTime: a.reassigned_time || undefined,
+        expectedConsultationTime: a.expected_consultation_time,
+        recommendedArrivalTime: a.recommended_arrival_time,
+        status: a.status,
+        paymentStatus: a.payment_status,
+        paymentMethod: a.payment_method || undefined,
+        bookingSource: a.booking_source,
+        advanceNoticePreferenceMinutes: a.advance_notice_preference_minutes,
+        isEmergency: a.is_emergency === 1,
+        emergencyReason: a.emergency_reason || undefined,
+        actualArrivalTime: a.actual_arrival_time || undefined,
+        consultationStartTime: a.consultation_start_time || undefined,
+        consultationEndTime: a.consultation_end_time || undefined,
+        consultationDurationMinutes: a.consultation_duration_minutes ?? undefined,
+        delayExplanation: a.delay_explanation || undefined,
+        rescheduledFromAppointmentId: a.rescheduled_from_appointment_id || undefined,
+        positionInQueue: a.position_in_queue ?? undefined,
+        childrenAhead: a.childrenAhead ?? a.children_ahead ?? undefined,
+        history: JSON.parse(a.history_json || '[]'),
+        createdAt: a.created_at,
+        updatedAt: a.updated_at,
+        hospitalId: effectiveHospitalId,
+        hospitalName: effectiveHospitalName,
+        trackingSecret: a.tracking_secret || undefined,
+        patientAge: a.patient_age ?? undefined,
+        guardianName: a.guardian_name || undefined,
+      };
+    });
 
     // Sessions
     const sessionRows = this.db.prepare('SELECT * FROM doctor_sessions').all() as any[];
@@ -1374,7 +1393,8 @@ export class SqliteManager {
         booking_source, advance_notice_preference_minutes, is_emergency, emergency_reason,
         actual_arrival_time, consultation_start_time, consultation_end_time,
         consultation_duration_minutes, delay_explanation, rescheduled_from_appointment_id,
-        position_in_queue, children_ahead, history_json, created_at, updated_at
+        position_in_queue, children_ahead, history_json, created_at, updated_at,
+        hospital_id, hospital_name, tracking_secret, patient_age, guardian_name, reassigned_time
       ) VALUES (
         @id, @appointmentNumber, @childId, @childName, @parentId, @parentName, @parentMobile,
         @doctorId, @doctorName, @branchId, @branchName, @date, @bookedTime,
@@ -1382,11 +1402,13 @@ export class SqliteManager {
         @bookingSource, @advanceNoticePreferenceMinutes, @isEmergency, @emergencyReason,
         @actualArrivalTime, @consultationStartTime, @consultationEndTime,
         @consultationDurationMinutes, @delayExplanation, @rescheduledFromAppointmentId,
-        @positionInQueue, @childrenAhead, @historyJson, @createdAt, @updatedAt
+        @positionInQueue, @childrenAhead, @historyJson, @createdAt, @updatedAt,
+        @hospitalId, @hospitalName, @trackingSecret, @patientAge, @guardianName, @reassignedTime
       )
       ON CONFLICT(id) DO UPDATE SET
         expected_consultation_time = excluded.expected_consultation_time,
         recommended_arrival_time = excluded.recommended_arrival_time,
+        reassigned_time = excluded.reassigned_time,
         status = excluded.status,
         payment_status = excluded.payment_status,
         payment_method = excluded.payment_method,
@@ -1401,7 +1423,12 @@ export class SqliteManager {
         position_in_queue = excluded.position_in_queue,
         children_ahead = excluded.children_ahead,
         history_json = excluded.history_json,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        hospital_id = excluded.hospital_id,
+        hospital_name = excluded.hospital_name,
+        tracking_secret = excluded.tracking_secret,
+        patient_age = excluded.patient_age,
+        guardian_name = excluded.guardian_name
     `).run({
       id: a.id,
       appointmentNumber: a.appointmentNumber,
@@ -1436,6 +1463,12 @@ export class SqliteManager {
       historyJson: JSON.stringify(a.history || []),
       createdAt: a.createdAt,
       updatedAt: a.updatedAt,
+      hospitalId: a.hospitalId || 'hosp_sdch',
+      hospitalName: a.hospitalName || null,
+      trackingSecret: a.trackingSecret || null,
+      patientAge: a.patientAge ?? null,
+      guardianName: a.guardianName || null,
+      reassignedTime: a.reassignedTime || null,
     });
   }
 
@@ -1469,7 +1502,7 @@ export class SqliteManager {
       currentAppointmentId: s.currentAppointmentId || null,
       currentDelayMinutes: s.currentDelayMinutes || 0,
       avgConsultationDurationMinutes: s.avgConsultationDurationMinutes || 15,
-      bufferAvailableMinutes: s.bufferAvailableMinutes || 0,
+      bufferAvailableMinutes: s.bufferAvailableMinutes !== undefined ? s.bufferAvailableMinutes : 20,
       emergencyAdjustmentCount: s.emergencyAdjustmentCount || 0,
       cancellationNotice: s.cancellationNotice || null,
     });

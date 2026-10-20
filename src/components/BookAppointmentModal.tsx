@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Doctor,
   HospitalBranch,
@@ -49,7 +49,7 @@ export const BookAppointmentModal: React.FC<BookAppointmentModalProps> = ({
   onBookingSuccess,
   onViewDashboard,
 }) => {
-  const todayStr = simulatedDate || new Date().toLocaleDateString('en-CA');
+  const todayStr = simulatedDate || (typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null) || new Date().toLocaleDateString('en-CA');
   // Selection states (with smart defaults for 1-click experience)
   const [selectedBranchId, setSelectedBranchId] = useState<BranchId>(initialBranchId || 'kakinada');
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>(initialDoctorId || 'dr-subba-rao');
@@ -142,6 +142,8 @@ export const BookAppointmentModal: React.FC<BookAppointmentModalProps> = ({
     prevIsOpenRef.current = isOpen;
   }, [isOpen, parentUser, initialDoctorId, initialBranchId]);
 
+  const loadSlotsRequestIdRef = React.useRef(0);
+
   // Load available slots whenever doctor, branch, or date changes
   useEffect(() => {
     if (isOpen && selectedDoctorId && selectedBranchId && selectedDate) {
@@ -150,36 +152,44 @@ export const BookAppointmentModal: React.FC<BookAppointmentModalProps> = ({
   }, [isOpen, selectedDoctorId, selectedBranchId, selectedDate]);
 
   const loadSlots = async () => {
+    const currentRequestId = ++loadSlotsRequestIdRef.current;
     setLoadingSlots(true);
     setErrorMsg('');
     try {
       const res = await fetch(
-        `/api/slots?doctorId=${selectedDoctorId}&branchId=${selectedBranchId}&date=${selectedDate}`
+        `/api/slots?doctorId=${selectedDoctorId}&branchId=${selectedBranchId}&date=${selectedDate}&_t=${Date.now()}`,
+        { cache: 'no-store' }
       );
       const data = await res.json();
-      if (Array.isArray(data)) {
-        // Exclude internal buffer slots from patient view
-        const availableSlots = data.filter((s) => !s.isBufferSlot);
-        setSlots(availableSlots);
+      if (currentRequestId === loadSlotsRequestIdRef.current) {
+        if (Array.isArray(data)) {
+          // Exclude internal buffer slots from patient view
+          const availableSlots = data.filter((s) => !s.isBufferSlot);
+          setSlots(availableSlots);
 
-        // Auto-select first available slot if previous selection is not in list
-        const stillValid = availableSlots.some((s) => s.time === selectedTime && s.available);
-        if (!stillValid) {
-          const firstAvail = availableSlots.find((s) => s.available);
-          if (firstAvail) {
-            setSelectedTime(firstAvail.time);
-          } else {
-            setSelectedTime('');
+          // Auto-select first available slot if previous selection is not in list
+          const stillValid = availableSlots.some((s) => s.time === selectedTime && s.available);
+          if (!stillValid) {
+            const firstAvail = availableSlots.find((s) => s.available);
+            if (firstAvail) {
+              setSelectedTime(firstAvail.time);
+            } else {
+              setSelectedTime('');
+            }
           }
+        } else {
+          setSlots([]);
+          setSelectedTime('');
         }
-      } else {
-        setSlots([]);
-        setSelectedTime('');
       }
     } catch (err) {
-      setSlots([]);
+      if (currentRequestId === loadSlotsRequestIdRef.current) {
+        setSlots([]);
+      }
     } finally {
-      setLoadingSlots(false);
+      if (currentRequestId === loadSlotsRequestIdRef.current) {
+        setLoadingSlots(false);
+      }
     }
   };
 

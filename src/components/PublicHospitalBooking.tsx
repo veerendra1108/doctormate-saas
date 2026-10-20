@@ -37,7 +37,10 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
 
   // Form State
   const [selectedDoctorId, setSelectedDoctorId] = useState('');
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const cached = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null;
+    return cached || new Date().toISOString().split('T')[0];
+  });
   const [selectedSlot, setSelectedSlot] = useState('');
   const [patientName, setPatientName] = useState('');
   const [mobileNumber, setMobileNumber] = useState('');
@@ -46,6 +49,7 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
   const [slots, setSlots] = useState<SlotAvailability[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   // Success Confirmation State
   const [confirmedAppt, setConfirmedAppt] = useState<{
@@ -109,16 +113,19 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
 
   const handleSubmitBooking = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
+
     if (!patientName.trim()) {
-      alert('Please enter patient name.');
+      setFormError('Please enter patient name.');
       return;
     }
-    if (!mobileNumber.trim() || mobileNumber.replace(/\D/g, '').length < 10) {
-      alert('Please enter a valid 10-digit mobile number.');
+    const cleanMobile = mobileNumber.replace(/\D/g, '');
+    if (!cleanMobile || cleanMobile.length < 10) {
+      setFormError('Please enter a valid 10-digit mobile number.');
       return;
     }
     if (!selectedSlot) {
-      alert('Please choose an available appointment slot.');
+      setFormError('Please choose an available appointment slot.');
       return;
     }
 
@@ -137,7 +144,7 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
           date: selectedDate,
           bookedTime: selectedSlot,
           patientName: patientName.trim(),
-          mobileNumber: mobileNumber.trim(),
+          mobileNumber: cleanMobile,
           patientAge: patientAge ? Number(patientAge) : undefined,
           guardianName: guardianName.trim() || undefined,
         }),
@@ -154,7 +161,7 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
         trackerUrl: data.trackerUrl,
       });
     } catch (err: any) {
-      alert(err.message || 'Error booking appointment.');
+      setFormError(err.message || 'Error booking appointment.');
     } finally {
       setSubmitting(false);
     }
@@ -266,6 +273,12 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
           </div>
 
           <form onSubmit={handleSubmitBooking} className="space-y-6">
+            {formError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-semibold flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
             {/* Doctor Picker */}
             <div>
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
@@ -334,11 +347,39 @@ export const PublicHospitalBooking: React.FC<PublicHospitalBookingProps> = ({
                   <div className="py-6 text-center text-xs text-slate-400 bg-slate-50 rounded-xl">
                     Loading slots...
                   </div>
-                ) : slots.length === 0 ? (
-                  <div className="py-6 text-center text-xs text-amber-700 bg-amber-50 rounded-xl">
-                    No open slots on this date.
-                  </div>
-                ) : (
+                ) : (() => {
+                  const dateParts = selectedDate ? selectedDate.split('-').map(Number) : [];
+                  const selectedDayOfWeek = dateParts.length === 3
+                    ? new Date(dateParts[0], dateParts[1] - 1, dateParts[2]).getDay()
+                    : new Date(selectedDate).getDay();
+                  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                  const selectedDayName = dayNames[selectedDayOfWeek] || 'this day';
+
+                  const doctorAvailableDays = selectedDoctor?.availableDays || (
+                    hospitalInfo.schedules?.find((s) => s.doctorId === selectedDoctorId)?.daysOfWeek
+                  ) || [1, 2, 3, 4, 5, 6];
+
+                  const isDoctorScheduled = Array.isArray(doctorAvailableDays) && doctorAvailableDays.includes(selectedDayOfWeek);
+
+                  if (!isDoctorScheduled) {
+                    return (
+                      <div className="py-6 px-4 text-center text-xs text-amber-800 bg-amber-50 rounded-xl border border-amber-200">
+                        <p className="font-semibold">{selectedDoctor?.name || 'Doctor'} is not scheduled on {selectedDayName}s.</p>
+                        <p className="text-[11px] text-amber-600 mt-1">Please select another date when the doctor is available.</p>
+                      </div>
+                    );
+                  }
+
+                  if (slots.length === 0) {
+                    return (
+                      <div className="py-6 px-4 text-center text-xs text-amber-700 bg-amber-50 rounded-xl">
+                        No open consultation slots on this date.
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })() || (
                   <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-36 overflow-y-auto p-1 bg-slate-50 rounded-xl border border-slate-100">
                     {slots.map((s) => {
                       const isAvailable = s.available;

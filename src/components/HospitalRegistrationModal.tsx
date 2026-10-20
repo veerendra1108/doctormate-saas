@@ -43,11 +43,51 @@ export const HospitalRegistrationModal: React.FC<HospitalRegistrationModalProps>
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pincodeLoading, setPincodeLoading] = useState(false);
+  const [pincodeSuccessMsg, setPincodeSuccessMsg] = useState<string | null>(null);
+  const [availablePlaces, setAvailablePlaces] = useState<string[]>([]);
 
   if (!isOpen) return null;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handlePincodeChange = async (pinInput: string) => {
+    const cleanPin = pinInput.replace(/\D/g, '').slice(0, 6);
+    setFormData((prev) => ({ ...prev, pincode: cleanPin }));
+
+    if (cleanPin.length < 6) {
+      setPincodeSuccessMsg(null);
+      setAvailablePlaces([]);
+      return;
+    }
+
+    if (cleanPin.length === 6) {
+      setPincodeLoading(true);
+      setPincodeSuccessMsg(null);
+      try {
+        const res = await fetch(`/api/pincode/${cleanPin}`);
+        const data = await res.json();
+        if (data.success) {
+          const autoCity = data.city || data.place || data.district || '';
+          const autoState = data.state || '';
+          setFormData((prev) => ({
+            ...prev,
+            city: autoCity || prev.city,
+            state: autoState || prev.state,
+          }));
+          if (Array.isArray(data.places) && data.places.length > 0) {
+            setAvailablePlaces(data.places);
+          }
+          setPincodeSuccessMsg(`✓ Auto-detected: ${autoCity ? `${autoCity}, ` : ''}${autoState}`);
+        }
+      } catch (err) {
+        console.warn('Pincode lookup failed:', err);
+      } finally {
+        setPincodeLoading(false);
+      }
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -216,44 +256,120 @@ export const HospitalRegistrationModal: React.FC<HospitalRegistrationModalProps>
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {/* 1. PIN Code with live auto-detection */}
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    City <span className="text-rose-500">*</span>
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700">
+                      PIN Code <span className="text-rose-500">*</span>
+                    </label>
+                    {pincodeLoading && (
+                      <span className="text-[10px] text-teal-600 font-semibold flex items-center gap-1 animate-pulse">
+                        <Sparkles className="w-3 h-3 animate-spin" /> Detecting...
+                      </span>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      name="pincode"
+                      id="hospital-reg-pincode"
+                      value={formData.pincode}
+                      onChange={(e) => handlePincodeChange(e.target.value)}
+                      placeholder="e.g. 533001"
+                      maxLength={6}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-semibold tracking-wider font-mono bg-white"
+                      required
+                    />
+                    {pincodeLoading && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                        <div className="w-4 h-4 border-2 border-teal-600 border-t-transparent rounded-full animate-spin"></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. City / Place (Auto-populated) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700">
+                      City / Place <span className="text-rose-500">*</span>
+                    </label>
+                    {formData.city && formData.pincode.length === 6 && (
+                      <span className="text-[10px] text-emerald-600 font-bold">Auto-filled</span>
+                    )}
+                  </div>
                   <input
                     type="text"
                     name="city"
+                    id="hospital-reg-city"
                     value={formData.city}
                     onChange={handleChange}
-                    placeholder="e.g. Hyderabad"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium"
+                    placeholder="e.g. Kakinada / Hyderabad"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium bg-white"
                     required
                   />
                 </div>
+
+                {/* 3. State (Auto-populated) */}
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">State</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700">
+                      State <span className="text-rose-500">*</span>
+                    </label>
+                    {formData.state && formData.pincode.length === 6 && (
+                      <span className="text-[10px] text-emerald-600 font-bold">Auto-filled</span>
+                    )}
+                  </div>
                   <input
                     type="text"
                     name="state"
+                    id="hospital-reg-state"
                     value={formData.state}
                     onChange={handleChange}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">PIN Code</label>
-                  <input
-                    type="text"
-                    name="pincode"
-                    value={formData.pincode}
-                    onChange={handleChange}
-                    placeholder="e.g. 500034"
-                    maxLength={6}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium"
+                    placeholder="e.g. Andhra Pradesh"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium bg-white"
+                    required
                   />
                 </div>
               </div>
+
+              {/* Success Badge & Locality Selection (if multiple places in this PIN code) */}
+              {pincodeSuccessMsg && (
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs flex items-center justify-between animate-fadeIn">
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    <span>{pincodeSuccessMsg}</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-full font-bold">
+                    Postal Verified
+                  </span>
+                </div>
+              )}
+
+              {availablePlaces.length > 1 && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                  <span className="text-[11px] font-bold text-slate-600 block">
+                    Choose specific locality / area under PIN {formData.pincode}:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                    {availablePlaces.map((pl) => (
+                      <button
+                        key={pl}
+                        type="button"
+                        onClick={() => setFormData((prev) => ({ ...prev, city: pl }))}
+                        className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
+                          formData.city === pl
+                            ? 'bg-teal-700 text-white font-bold shadow-xs'
+                            : 'bg-white border border-slate-200 text-slate-700 hover:bg-teal-50 hover:border-teal-300'
+                        }`}
+                      >
+                        {pl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Administrator Account Details */}

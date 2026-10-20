@@ -45,7 +45,156 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-// --- DOCTORMATE SAAS MULTI-HOSPITAL ENDPOINTS ---
+// In-memory cache for pincode lookups (PIN -> data)
+const pincodeLookupCache = new Map<string, {
+  pincode: string;
+  place: string;
+  city: string;
+  district: string;
+  state: string;
+  places: string[];
+}>();
+
+// Comprehensive Indian PIN Code Prefix Directory (covers all zones & states in India)
+const PIN_PREFIX_STATE_MAP: Record<string, { state: string; region: string }> = {
+  '11': { state: 'Delhi', region: 'New Delhi' },
+  '12': { state: 'Haryana', region: 'Gurugram' },
+  '13': { state: 'Haryana', region: 'Ambala' },
+  '14': { state: 'Punjab', region: 'Ludhiana' },
+  '15': { state: 'Punjab', region: 'Bathinda' },
+  '16': { state: 'Chandigarh', region: 'Chandigarh' },
+  '17': { state: 'Himachal Pradesh', region: 'Shimla' },
+  '18': { state: 'Jammu & Kashmir', region: 'Jammu' },
+  '19': { state: 'Jammu & Kashmir', region: 'Srinagar' },
+  '20': { state: 'Uttar Pradesh', region: 'Ghaziabad' },
+  '21': { state: 'Uttar Pradesh', region: 'Prayagraj / Kanpur' },
+  '22': { state: 'Uttar Pradesh', region: 'Lucknow' },
+  '23': { state: 'Uttar Pradesh', region: 'Varanasi' },
+  '24': { state: 'Uttarakhand', region: 'Dehradun' },
+  '25': { state: 'Uttar Pradesh', region: 'Meerut' },
+  '26': { state: 'Uttarakhand', region: 'Nainital' },
+  '27': { state: 'Uttar Pradesh', region: 'Gorakhpur' },
+  '28': { state: 'Uttar Pradesh', region: 'Agra' },
+  '30': { state: 'Rajasthan', region: 'Jaipur' },
+  '31': { state: 'Rajasthan', region: 'Udaipur' },
+  '32': { state: 'Rajasthan', region: 'Ajmer' },
+  '33': { state: 'Rajasthan', region: 'Bikaner' },
+  '34': { state: 'Rajasthan', region: 'Jodhpur' },
+  '36': { state: 'Gujarat', region: 'Rajkot' },
+  '37': { state: 'Gujarat', region: 'Kutch / Bhavnagar' },
+  '38': { state: 'Gujarat', region: 'Ahmedabad' },
+  '39': { state: 'Gujarat', region: 'Surat / Vadodara' },
+  '40': { state: 'Maharashtra', region: 'Mumbai / Goa' },
+  '41': { state: 'Maharashtra', region: 'Pune' },
+  '42': { state: 'Maharashtra', region: 'Nashik' },
+  '43': { state: 'Maharashtra', region: 'Chhatrapati Sambhajinagar' },
+  '44': { state: 'Maharashtra', region: 'Nagpur' },
+  '45': { state: 'Madhya Pradesh', region: 'Indore' },
+  '46': { state: 'Madhya Pradesh', region: 'Bhopal' },
+  '47': { state: 'Madhya Pradesh', region: 'Gwalior' },
+  '48': { state: 'Madhya Pradesh', region: 'Jabalpur' },
+  '49': { state: 'Chhattisgarh', region: 'Raipur' },
+  '50': { state: 'Telangana', region: 'Hyderabad' },
+  '51': { state: 'Andhra Pradesh', region: 'Tirupati' },
+  '52': { state: 'Andhra Pradesh', region: 'Vijayawada / Guntur' },
+  '53': { state: 'Andhra Pradesh', region: 'Visakhapatnam / Kakinada' },
+  '56': { state: 'Karnataka', region: 'Bengaluru' },
+  '57': { state: 'Karnataka', region: 'Mangaluru / Mysuru' },
+  '58': { state: 'Karnataka', region: 'Hubballi / Dharwad' },
+  '59': { state: 'Karnataka', region: 'Belagavi' },
+  '60': { state: 'Tamil Nadu', region: 'Chennai' },
+  '61': { state: 'Tamil Nadu', region: 'Tiruchirappalli' },
+  '62': { state: 'Tamil Nadu', region: 'Madurai' },
+  '63': { state: 'Tamil Nadu', region: 'Salem / Vellore' },
+  '64': { state: 'Tamil Nadu', region: 'Coimbatore' },
+  '67': { state: 'Kerala', region: 'Kozhikode' },
+  '68': { state: 'Kerala', region: 'Kochi / Thrissur' },
+  '69': { state: 'Kerala', region: 'Thiruvananthapuram' },
+  '70': { state: 'West Bengal', region: 'Kolkata' },
+  '71': { state: 'West Bengal', region: 'Howrah / Hooghly' },
+  '72': { state: 'West Bengal', region: 'Midnapore' },
+  '73': { state: 'West Bengal', region: 'Siliguri' },
+  '74': { state: 'West Bengal', region: 'North 24 Parganas' },
+  '75': { state: 'Odisha', region: 'Bhubaneswar / Cuttack' },
+  '76': { state: 'Odisha', region: 'Berhampur / Sambalpur' },
+  '77': { state: 'Odisha', region: 'Rourkela' },
+  '78': { state: 'Assam', region: 'Guwahati' },
+  '79': { state: 'North Eastern Region', region: 'Shillong / Imphal' },
+  '80': { state: 'Bihar', region: 'Patna' },
+  '81': { state: 'Bihar', region: 'Bhagalpur' },
+  '82': { state: 'Jharkhand', region: 'Ranchi / Dhanbad' },
+  '83': { state: 'Jharkhand', region: 'Jamshedpur' },
+  '84': { state: 'Bihar', region: 'Muzaffarpur' },
+  '85': { state: 'Bihar', region: 'Purnia' },
+};
+
+// PIN Code Auto-Detection Endpoint for Hospital & Patient Registration
+apiRouter.get('/pincode/:pincode', async (req, res) => {
+  const pin = String(req.params.pincode || '').replace(/\D/g, '').trim();
+  if (pin.length !== 6) {
+    return res.status(400).json({ success: false, error: 'PIN code must be exactly 6 digits.' });
+  }
+
+  // 1. Check in-memory cache
+  if (pincodeLookupCache.has(pin)) {
+    return res.json({ success: true, ...pincodeLookupCache.get(pin)! });
+  }
+
+  // Prefix fallback for state and region
+  const prefix2 = pin.substring(0, 2);
+  const fallback = PIN_PREFIX_STATE_MAP[prefix2] || { state: 'Andhra Pradesh', region: 'City' };
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+    const externalRes = await fetch(`https://api.postalpincode.in/pincode/${pin}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (externalRes.ok) {
+      const data = await externalRes.json();
+      if (
+        Array.isArray(data) &&
+        data[0]?.Status === 'Success' &&
+        Array.isArray(data[0]?.PostOffice) &&
+        data[0].PostOffice.length > 0
+      ) {
+        const postOffices = data[0].PostOffice;
+        const state = postOffices[0].State || fallback.state;
+        const district = postOffices[0].District || fallback.region;
+        const headPO = postOffices.find((po: any) => po.BranchType === 'Head Post Office') || postOffices[0];
+        const place = headPO.District || headPO.Name || fallback.region;
+        const uniquePlaces = Array.from(new Set(postOffices.map((po: any) => po.Name).filter(Boolean))) as string[];
+
+        const result = {
+          pincode: pin,
+          state,
+          district,
+          place,
+          city: district || place,
+          places: uniquePlaces.length > 0 ? uniquePlaces : [place],
+        };
+        pincodeLookupCache.set(pin, result);
+        return res.json({ success: true, ...result });
+      }
+    }
+  } catch {
+    // Silently fall back to geographic PIN prefix map if network call fails or times out
+  }
+
+  const fallbackResult = {
+    pincode: pin,
+    state: fallback.state,
+    district: fallback.region,
+    place: fallback.region,
+    city: fallback.region,
+    places: [fallback.region],
+  };
+  pincodeLookupCache.set(pin, fallbackResult);
+  return res.json({ success: true, ...fallbackResult });
+});
 
 // List all registered hospitals (for public directory & "Find Hospital")
 apiRouter.get('/hospitals', (req, res) => {
@@ -254,7 +403,7 @@ apiRouter.post('/hospitals/:id/onboarding', (req, res) => {
       if (!docInput.name) return;
       const docId = docInput.id || `doc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const customSlotDuration = Number(docInput.slotDurationMinutes) || 15;
-      const availableDays = Array.isArray(docInput.availableDays) ? docInput.availableDays : [1, 2, 3, 4, 5, 6];
+      const availableDays = (Array.isArray(docInput.availableDays) ? docInput.availableDays : [1, 2, 3, 4, 5, 6]).map((d: number) => (d === 7 ? 0 : d));
 
       // Find or create doctor
       let existingDoc = state.doctors.find((d) => d.id === docId && d.hospitalId === id);
@@ -407,9 +556,14 @@ apiRouter.get('/hospital-admin/:hospitalId/dashboard', (req, res) => {
   });
 
   const today = state.config.simulatedDate;
-  const todayAppts = (state.appointments || []).filter(
-    (a) => (a.hospitalId || 'hosp_sdch') === hospitalId && a.date === today
-  );
+  const todayAppts = (state.appointments || []).filter((a) => {
+    const aDoc = (state.doctors || []).find((d) => d.id === a.doctorId);
+    const aHospId =
+      a.hospitalId && a.hospitalId !== 'hosp_sdch'
+        ? a.hospitalId
+        : (aDoc?.hospitalId || a.hospitalId || 'hosp_sdch');
+    return aHospId === hospitalId && a.date === today;
+  });
 
   res.json({
     hospital,
@@ -466,7 +620,7 @@ apiRouter.post('/hospital-admin/:hospitalId/doctors', (req, res) => {
   const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
   const customSlotDuration = Number(slotDurationMinutes) || 15;
   const customBuffer = bufferMinutesPerHour !== undefined && !isNaN(Number(bufferMinutesPerHour)) ? Number(bufferMinutesPerHour) : 10;
-  const days = Array.isArray(availableDays) && availableDays.length > 0 ? availableDays : [1, 2, 3, 4, 5, 6];
+  const days = (Array.isArray(availableDays) && availableDays.length > 0 ? availableDays : [1, 2, 3, 4, 5, 6]).map((d: number) => (d === 7 ? 0 : d));
   const branchId = state.branches.find((b) => (b.hospitalId || 'hosp_sdch') === hospitalId)?.id || 'main';
 
   const newDoc: Doctor = {
@@ -555,7 +709,7 @@ apiRouter.put('/hospital-admin/:hospitalId/doctors/:doctorId', (req, res) => {
     doc.slotDurationMinutes = Number(slotDurationMinutes) || 15;
   }
   if (availableDays !== undefined && Array.isArray(availableDays)) {
-    doc.availableDays = availableDays;
+    doc.availableDays = availableDays.map((d: number) => (d === 7 ? 0 : d));
   }
 
   // Find or create schedule for doctor
@@ -663,16 +817,25 @@ apiRouter.get('/reception/dashboard', (req, res) => {
   const targetDate = String(date || state.config.simulatedDate);
 
   // Recalculate session queue for active doctors of this hospital
+  const hospitalDoctorIds = new Set(
+    (state.doctors || []).filter((d) => (d.hospitalId || 'hosp_sdch') === targetHospitalId).map((d) => d.id)
+  );
+
   state.sessions
-    .filter((s) => (s.hospitalId || 'hosp_sdch') === targetHospitalId && s.date === targetDate)
+    .filter((s) => ((s.hospitalId || 'hosp_sdch') === targetHospitalId || hospitalDoctorIds.has(s.doctorId)) && s.date === targetDate)
     .forEach((s) => {
       schedulingService.recalculateSessionQueue(s.doctorId, s.branchId, s.date);
     });
 
   // Get appointments strictly scoped to this hospital
-  let appts = (state.appointments || []).filter(
-    (a) => (a.hospitalId || 'hosp_sdch') === targetHospitalId && a.date === targetDate
-  );
+  let appts = (state.appointments || []).filter((a) => {
+    const aDoc = (state.doctors || []).find((d) => d.id === a.doctorId);
+    const aHospId =
+      a.hospitalId && a.hospitalId !== 'hosp_sdch'
+        ? a.hospitalId
+        : (aDoc?.hospitalId || a.hospitalId || 'hosp_sdch');
+    return aHospId === targetHospitalId && a.date === targetDate;
+  });
 
   if (doctorId && doctorId !== 'all') {
     appts = appts.filter((a) => a.doctorId === doctorId);
@@ -700,7 +863,7 @@ apiRouter.get('/reception/dashboard', (req, res) => {
   let currentDelay = 0;
   if (doctorId && doctorId !== 'all') {
     const session = state.sessions.find(
-      (s) => s.doctorId === doctorId && (s.hospitalId || 'hosp_sdch') === targetHospitalId && s.date === targetDate
+      (s) => s.doctorId === doctorId && s.date === targetDate && ((s.hospitalId || 'hosp_sdch') === targetHospitalId || hospitalDoctorIds.has(s.doctorId))
     );
     currentDelay = session?.currentDelayMinutes || 0;
   }
@@ -761,6 +924,32 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
   const targetBranchId = branchId || doctor.branches[0] || 'main';
   const branch = state.branches.find((b) => b.id === targetBranchId);
 
+  // Verify doctor working days and authoritative availability
+  const dateParts = date.split('-').map(Number);
+  const dayOfWeek = dateParts.length === 3
+    ? new Date(dateParts[0], dateParts[1] - 1, dateParts[2]).getDay()
+    : new Date(date).getDay();
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  const isDayIncluded = (days: number[] | undefined, dow: number) => {
+    if (!Array.isArray(days) || days.length === 0) return true;
+    if (dow === 0) return days.includes(0) || days.includes(7);
+    return days.includes(dow);
+  };
+
+  if (Array.isArray(doctor.availableDays) && !isDayIncluded(doctor.availableDays, dayOfWeek)) {
+    return res.status(400).json({
+      error: `${doctor.name} is not scheduled for consultations on ${dayNames[dayOfWeek]}s.`,
+    });
+  }
+
+  const availableSlots = schedulingService.getAvailableSlots(doctorId, targetBranchId, date);
+  if (availableSlots.length === 0) {
+    return res.status(400).json({
+      error: `${doctor.name} has no consultation schedule on ${date} (${dayNames[dayOfWeek]}).`,
+    });
+  }
+
   // Check double-booking and slot overlap based on doctor's consultation duration
   const slotDuration = doctor.slotDurationMinutes || 15;
   const requestedStart = timeToMinutes(bookedTime);
@@ -769,7 +958,7 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
   const overlappingAppt = state.appointments.find((a) => {
     if ((a.hospitalId || 'hosp_sdch') !== targetHospitalId) return false;
     if (a.doctorId !== doctorId || a.date !== date) return false;
-    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)) return false;
+    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED', 'CANCELLED', 'NO_SHOW'].includes(a.status)) return false;
 
     const existingStart = timeToMinutes(a.bookedTime);
     const existingEnd = existingStart + slotDuration;
@@ -783,14 +972,44 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
     });
   }
 
+  const schedule = state.schedules.find((s) => s.doctorId === doctorId && s.branchId === targetBranchId)
+    || state.schedules.find((s) => s.doctorId === doctorId);
+  const scheduleStartTime = schedule?.startTime || '09:00';
+  const scheduleEndTime = schedule?.endTime || '17:00';
+  const docStart = timeToMinutes(scheduleStartTime);
+  const docEnd = timeToMinutes(scheduleEndTime);
+  if (requestedStart < docStart || requestedEnd > docEnd) {
+    return res.status(400).json({
+      error: `The requested time (${bookedTime}) is outside ${doctor.name}'s consultation hours (${scheduleStartTime} - ${scheduleEndTime}).`,
+    });
+  }
+
+  const candidateSlot = availableSlots.find((s) => s.time === bookedTime);
+  if (candidateSlot && !candidateSlot.available) {
+    return res.status(409).json({
+      error: `The requested time slot (${bookedTime}) for ${doctor.name} is already booked. Please choose an available slot.`,
+    });
+  }
+  if (candidateSlot?.isBufferSlot) {
+    return res.status(400).json({
+      error: 'This slot is reserved as a hospital buffer/break period and cannot be booked.',
+    });
+  }
+
   // Generate structured unique token number
   const hospPrefix = hospital?.slug ? hospital.slug.substring(0, 4).toUpperCase() : 'HOSP';
   const ddmmyy = date.replace(/-/g, '').slice(2);
   const timeCode = bookedTime.replace(':', '');
   const baseApptNum = `DM-${hospPrefix}-${ddmmyy}-${timeCode}`;
 
-  const duplicates = state.appointments.filter((a) => a.appointmentNumber.startsWith(baseApptNum));
-  const appointmentNumber = duplicates.length > 0 ? `${baseApptNum}-${duplicates.length + 1}` : baseApptNum;
+  let appointmentNumber = baseApptNum;
+  if (state.appointments.some((a) => a.appointmentNumber === appointmentNumber)) {
+    let suffix = 2;
+    while (state.appointments.some((a) => a.appointmentNumber === `${baseApptNum}-${suffix}`)) {
+      suffix++;
+    }
+    appointmentNumber = `${baseApptNum}-${suffix}`;
+  }
 
   const apptId = `apt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const trackingSecret = Math.random().toString(36).substring(2, 10);
@@ -852,6 +1071,7 @@ apiRouter.post('/reception/phone-booking', (req, res) => {
   return res.json({
     success: true,
     appointment: newAppointment,
+    appointmentNumber,
     token: appointmentNumber,
     trackerUrl,
     relativeTrackerUrl,
@@ -891,6 +1111,32 @@ apiRouter.post('/appointments/online-book', (req, res) => {
   const targetBranchId = branchId || doctor.branches[0] || 'main';
   const branch = state.branches.find((b) => b.id === targetBranchId);
 
+  // Verify doctor working days and authoritative availability
+  const dateParts = date.split('-').map(Number);
+  const dayOfWeek = dateParts.length === 3
+    ? new Date(dateParts[0], dateParts[1] - 1, dateParts[2]).getDay()
+    : new Date(date).getDay();
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  const isDayIncluded = (days: number[] | undefined, dow: number) => {
+    if (!Array.isArray(days) || days.length === 0) return true;
+    if (dow === 0) return days.includes(0) || days.includes(7);
+    return days.includes(dow);
+  };
+
+  if (Array.isArray(doctor.availableDays) && !isDayIncluded(doctor.availableDays, dayOfWeek)) {
+    return res.status(400).json({
+      error: `${doctor.name} is not scheduled for consultations on ${dayNames[dayOfWeek]}s.`,
+    });
+  }
+
+  const availableSlots = schedulingService.getAvailableSlots(doctorId, targetBranchId, date);
+  if (availableSlots.length === 0) {
+    return res.status(400).json({
+      error: `${doctor.name} has no consultation schedule on ${date} (${dayNames[dayOfWeek]}).`,
+    });
+  }
+
   // Prevent double-booking and slot overlap based on doctor's consultation duration
   const slotDuration = doctor.slotDurationMinutes || 15;
   const requestedStart = timeToMinutes(bookedTime);
@@ -899,7 +1145,7 @@ apiRouter.post('/appointments/online-book', (req, res) => {
   const overlappingAppt = state.appointments.find((a) => {
     if ((a.hospitalId || 'hosp_sdch') !== targetHospitalId) return false;
     if (a.doctorId !== doctorId || a.date !== date) return false;
-    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED'].includes(a.status)) return false;
+    if (['RESCHEDULED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED', 'CANCELLED', 'NO_SHOW'].includes(a.status)) return false;
 
     const existingStart = timeToMinutes(a.bookedTime);
     const existingEnd = existingStart + slotDuration;
@@ -913,13 +1159,43 @@ apiRouter.post('/appointments/online-book', (req, res) => {
     });
   }
 
+  const schedule = state.schedules.find((s) => s.doctorId === doctorId && s.branchId === targetBranchId)
+    || state.schedules.find((s) => s.doctorId === doctorId);
+  const scheduleStartTime = schedule?.startTime || '09:00';
+  const scheduleEndTime = schedule?.endTime || '17:00';
+  const docStart = timeToMinutes(scheduleStartTime);
+  const docEnd = timeToMinutes(scheduleEndTime);
+  if (requestedStart < docStart || requestedEnd > docEnd) {
+    return res.status(400).json({
+      error: `The requested time (${bookedTime}) is outside ${doctor.name}'s consultation hours (${scheduleStartTime} - ${scheduleEndTime}).`,
+    });
+  }
+
+  const candidateSlot = availableSlots.find((s) => s.time === bookedTime);
+  if (candidateSlot && !candidateSlot.available) {
+    return res.status(409).json({
+      error: `The requested time slot (${bookedTime}) for ${doctor.name} is already booked. Please choose an available slot.`,
+    });
+  }
+  if (candidateSlot?.isBufferSlot) {
+    return res.status(400).json({
+      error: 'This slot is reserved as a hospital buffer/break period and cannot be booked.',
+    });
+  }
+
   const hospPrefix = hospital?.slug ? hospital.slug.substring(0, 4).toUpperCase() : 'HOSP';
   const ddmmyy = date.replace(/-/g, '').slice(2);
   const timeCode = bookedTime.replace(':', '');
   const baseApptNum = `DM-${hospPrefix}-${ddmmyy}-${timeCode}`;
 
-  const duplicates = state.appointments.filter((a) => a.appointmentNumber.startsWith(baseApptNum));
-  const appointmentNumber = duplicates.length > 0 ? `${baseApptNum}-${duplicates.length + 1}` : baseApptNum;
+  let appointmentNumber = baseApptNum;
+  if (state.appointments.some((a) => a.appointmentNumber === appointmentNumber)) {
+    let suffix = 2;
+    while (state.appointments.some((a) => a.appointmentNumber === `${baseApptNum}-${suffix}`)) {
+      suffix++;
+    }
+    appointmentNumber = `${baseApptNum}-${suffix}`;
+  }
 
   const apptId = `apt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const trackingSecret = Math.random().toString(36).substring(2, 10);
@@ -980,20 +1256,32 @@ apiRouter.post('/appointments/online-book', (req, res) => {
 
 // --- SECURE APPOINTMENT TRACKING ---
 apiRouter.get('/appointments/secure-track', (req, res) => {
-  const { id, token, mobile, secret } = req.query;
+  const { id, token, appointmentId, mobile, mobileNumber, secret } = req.query;
   const state = db.getState();
-  const searchId = String(id || token || '').trim().toLowerCase();
-  const searchMobile = String(mobile || '').replace(/\D/g, '');
+  const searchId = String(id || token || appointmentId || '').trim().toLowerCase();
+  const searchMobile = String(mobile || mobileNumber || '').replace(/\D/g, '');
   const searchSecret = String(secret || '').trim();
 
   if (!searchId) {
     return res.status(400).json({ error: 'Please enter your Appointment ID or Token number.' });
   }
 
-  // Find appointment
-  const appt = state.appointments.find(
-    (a) => a.appointmentNumber.toLowerCase() === searchId || a.id.toLowerCase() === searchId
-  );
+  // Find appointment - if mobile is supplied, prioritize matching both ID and mobile to disambiguate
+  let appt = state.appointments.find((a) => {
+    const idMatch = a.appointmentNumber.toLowerCase() === searchId || a.id.toLowerCase() === searchId;
+    if (!idMatch) return false;
+    if (searchMobile.length >= 4) {
+      const apptDigits = (a.parentMobile || '').replace(/\D/g, '');
+      return apptDigits.endsWith(searchMobile) || apptDigits === searchMobile;
+    }
+    return true;
+  });
+
+  if (!appt) {
+    appt = state.appointments.find(
+      (a) => a.appointmentNumber.toLowerCase() === searchId || a.id.toLowerCase() === searchId
+    );
+  }
 
   if (!appt) {
     return res.status(404).json({ error: 'Appointment not found. Please check your booking ID and try again.' });
@@ -1014,54 +1302,120 @@ apiRouter.get('/appointments/secure-track', (req, res) => {
     });
   }
 
-  // Recalculate live queue for the doctor session
-  schedulingService.recalculateSessionQueue(appt.doctorId, appt.branchId, appt.date);
+  const doctor = (state.doctors || []).find((d) => d.id === appt.doctorId);
+  const effectiveHospitalId =
+    appt.hospitalId && appt.hospitalId !== 'hosp_sdch'
+      ? appt.hospitalId
+      : (doctor?.hospitalId || appt.hospitalId || 'hosp_sdch');
+  const hospital = (state.hospitals || []).find((h) => h.id === effectiveHospitalId);
+  const resolvedHospitalName = hospital?.name || appt.hospitalName || 'Doctormate Hospital';
 
-  const session = state.sessions.find(
+  let session = state.sessions.find(
     (s) => s.doctorId === appt.doctorId && s.branchId === appt.branchId && s.date === appt.date
   );
+  if (!session || session.currentDelayMinutes === 0) {
+    const delayedSession = state.sessions.find(
+      (s) => s.doctorId === appt.doctorId && s.date === appt.date && s.currentDelayMinutes > 0
+    );
+    if (delayedSession) {
+      session = delayedSession;
+    }
+  }
+  if (!session) {
+    session = state.sessions.find(
+      (s) => s.doctorId === appt.doctorId && s.date === appt.date
+    );
+  }
 
-  const hospital = (state.hospitals || []).find((h) => h.id === (appt.hospitalId || 'hosp_sdch'));
-  const doctor = (state.doctors || []).find((d) => d.id === appt.doctorId);
+  // Recalculate live queue for the doctor session
+  schedulingService.recalculateSessionQueue(appt.doctorId, session ? session.branchId : appt.branchId, appt.date);
+  if (session && session.branchId !== appt.branchId) {
+    schedulingService.recalculateSessionQueue(appt.doctorId, appt.branchId, appt.date);
+  }
 
   // Compute patients ahead (appointments earlier in queue that are not finished)
   const queueAppointments = state.appointments
-    .filter(
-      (a) =>
-        (a.hospitalId || 'hosp_sdch') === (appt.hospitalId || 'hosp_sdch') &&
+    .filter((a) => {
+      const aDoc = (state.doctors || []).find((d) => d.id === a.doctorId);
+      const aHospId =
+        a.hospitalId && a.hospitalId !== 'hosp_sdch'
+          ? a.hospitalId
+          : (aDoc?.hospitalId || a.hospitalId || 'hosp_sdch');
+      return (
+        aHospId === effectiveHospitalId &&
         a.doctorId === appt.doctorId &&
         a.branchId === appt.branchId &&
         a.date === appt.date &&
         !['COMPLETED', 'NO_SHOW', 'HOSPITAL_CANCELLED', 'RESCHEDULED'].includes(a.status)
-    )
+      );
+    })
     .sort((a, b) => timeToMinutes(a.bookedTime) - timeToMinutes(b.bookedTime));
 
+  const isTerminal = ['COMPLETED', 'NO_SHOW', 'HOSPITAL_CANCELLED', 'RESCHEDULED', 'SLOT_RELEASED'].includes(appt.status);
+  const isWithDoctor = appt.status === 'WITH_DOCTOR';
+  const isFuture = appt.date > state.config.simulatedDate;
   const apptIndex = queueAppointments.findIndex((a) => a.id === appt.id);
-  const patientsAhead = apptIndex >= 0 ? apptIndex : 0;
-  const positionInQueue = apptIndex >= 0 ? apptIndex + 1 : 1;
+  const patientsAhead = isTerminal || isWithDoctor ? 0 : (apptIndex >= 0 ? apptIndex : 0);
+  const positionInQueue = isTerminal ? null : (isWithDoctor ? 1 : (apptIndex >= 0 ? apptIndex + 1 : 1));
+
+  const estimatedTime = isTerminal
+    ? null
+    : isWithDoctor
+    ? (appt.consultationStartTime || state.config.simulatedTime)
+    : (appt.expectedConsultationTime || appt.bookedTime);
+
+  // Section 1 of PDF:
+  // Individual delay = expected time - booked time
+  // Estimated time remaining = expected time - current time
+  const sessionDelay = isFuture ? 0 : (session?.currentDelayMinutes || 0);
+  const individualDelayMinutes = (!isTerminal && !isWithDoctor && !isFuture && estimatedTime && appt.bookedTime)
+    ? Math.max(0, timeToMinutes(estimatedTime) - timeToMinutes(appt.bookedTime))
+    : 0;
+
+  const nowMinutes = timeToMinutes(state.config.simulatedTime);
+  const estimatedTimeRemainingMinutes = (!isTerminal && !isWithDoctor && !isFuture && estimatedTime)
+    ? Math.max(0, timeToMinutes(estimatedTime) - nowMinutes)
+    : 0;
 
   res.json({
     success: true,
     appointmentNumber: appt.appointmentNumber,
-    hospitalName: appt.hospitalName || hospital?.name || 'Doctormate Hospital',
+    hospitalName: resolvedHospitalName,
     doctorName: doctor?.name || appt.doctorName,
     doctorSpecialty: doctor?.specialty || 'Specialist Consultant',
     patientName: appt.childName,
+    childName: appt.childName,
     date: appt.date,
+    bookedTime: appt.bookedTime,
     scheduledTime: appt.bookedTime,
     status: appt.status,
+    isTerminal,
+    isFutureAppointment: isFuture,
     positionInQueue,
     patientsAhead,
-    estimatedConsultationTime: appt.expectedConsultationTime || appt.bookedTime,
-    estimatedDelayMinutes: session?.currentDelayMinutes || 0,
-    recommendedArrivalTime: appt.recommendedArrivalTime || appt.bookedTime,
+    consultationStartTime: appt.consultationStartTime || (isWithDoctor ? (appt.consultationStartTime || state.config.simulatedTime) : undefined),
+    estimatedConsultationTime: estimatedTime,
+    estimatedDelayMinutes: sessionDelay,
+    individualDelayMinutes,
+    estimatedTimeRemainingMinutes,
+    sessionDelayMinutes: sessionDelay,
+    delayReason: session?.delayReason || undefined,
+    delayType: session?.delayType || undefined,
+    recommendedArrivalTime: (isTerminal || isWithDoctor) ? null : (appt.recommendedArrivalTime || appt.bookedTime),
+    delayExplanation: isTerminal
+      ? null
+      : isWithDoctor
+      ? `Currently in consultation chamber with ${doctor?.name || appt.doctorName}.`
+      : isFuture
+      ? `On schedule for ${appt.date}.`
+      : appt.delayExplanation,
     lastUpdatedTime: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
   });
 });
 
 // Doctor delay update from Receptionist
 apiRouter.post('/reception/doctor-delay', (req, res) => {
-  const { hospitalId, doctorId, branchId, date, delayMinutes, explanation } = req.body;
+  const { hospitalId, doctorId, branchId, date, delayMinutes, explanation, delayType } = req.body;
   if (!doctorId || delayMinutes === undefined) {
     return res.status(400).json({ error: 'Doctor ID and delay minutes are required.' });
   }
@@ -1072,7 +1426,7 @@ apiRouter.post('/reception/doctor-delay', (req, res) => {
   const targetBranchId = branchId || state.doctors.find((d) => d.id === doctorId)?.branches[0] || 'main';
 
   let session = state.sessions.find(
-    (s) => (s.hospitalId || 'hosp_sdch') === targetHospitalId && s.doctorId === doctorId && s.branchId === targetBranchId && s.date === targetDate
+    (s) => ((s.hospitalId || 'hosp_sdch') === targetHospitalId || s.doctorId === doctorId) && s.doctorId === doctorId && s.branchId === targetBranchId && s.date === targetDate
   );
 
   if (!session) {
@@ -1080,15 +1434,41 @@ apiRouter.post('/reception/doctor-delay', (req, res) => {
     session.hospitalId = targetHospitalId;
   }
 
-  session.currentDelayMinutes = Math.max(0, Number(delayMinutes));
-  if (explanation) session.cancellationNotice = String(explanation);
+  const numDelay = Math.max(0, Number(delayMinutes));
 
-  // Recalculate rolling ETAs for this session
-  schedulingService.recalculateSessionQueue(doctorId, targetBranchId, targetDate);
+  // Synchronize delay across all active sessions for this doctor on this date
+  const doctorSessions = state.sessions.filter(
+    (s) => s.doctorId === doctorId && s.date === targetDate
+  );
+  if (doctorSessions.length > 0) {
+    doctorSessions.forEach((s) => {
+      s.manualDelayMinutes = numDelay;
+      s.currentDelayMinutes = numDelay;
+      if (hospitalId) s.hospitalId = targetHospitalId;
+      if (explanation) {
+        s.delayReason = String(explanation);
+        s.cancellationNotice = String(explanation);
+      }
+      if (delayType) s.delayType = delayType;
+      schedulingService.recalculateSessionQueue(doctorId, s.branchId, targetDate);
+    });
+  } else {
+    session.manualDelayMinutes = numDelay;
+    session.currentDelayMinutes = numDelay;
+    if (hospitalId) session.hospitalId = targetHospitalId;
+    if (explanation) {
+      session.delayReason = String(explanation);
+      session.cancellationNotice = String(explanation);
+    }
+    if (delayType) session.delayType = delayType;
+    schedulingService.recalculateSessionQueue(doctorId, targetBranchId, targetDate);
+  }
   db.persistState();
 
   res.json({
     success: true,
+    doctorId: session.doctorId,
+    currentDelayMinutes: session.currentDelayMinutes,
     session,
     message: `Doctor delay updated to ${delayMinutes} minutes. ETAs dynamically recalculated.`,
   });
@@ -1252,6 +1632,10 @@ apiRouter.get('/doctors/:id/schedules', (req, res) => {
 
 // Available slots for doctor on date and branch
 apiRouter.get('/slots', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   const { doctorId, branchId, date } = req.query;
   if (!doctorId || !date) {
     return res.status(400).json({ error: 'doctorId and date query params are required' });
@@ -1536,6 +1920,35 @@ apiRouter.put('/appointments/:id', (req, res) => {
     });
   }
 
+  // DM-R7-009: Validate slot availability & offered consultation schedule if time/date/doctor is modified
+  const targetTime = bookedTime ? String(bookedTime).trim() : appt.bookedTime;
+  const targetDate = date ? String(date).trim() : appt.date;
+  const targetDoctorId = doctorId ? String(doctorId).trim() : appt.doctorId;
+  const targetBranchId = (branchId as BranchId) || appt.branchId;
+
+  const isScheduleChanging =
+    targetTime !== appt.bookedTime ||
+    targetDate !== appt.date ||
+    targetDoctorId !== appt.doctorId ||
+    targetBranchId !== appt.branchId;
+
+  if (isScheduleChanging) {
+    const slotValidation = schedulingService.validateSlotForBookingOrReschedule({
+      doctorId: targetDoctorId,
+      branchId: targetBranchId,
+      date: targetDate,
+      bookedTime: targetTime,
+      excludeAppointmentId: appt.id,
+    });
+
+    if (!slotValidation.valid) {
+      return res.status(slotValidation.status).json({
+        success: false,
+        message: slotValidation.message,
+      });
+    }
+  }
+
   // Update appointment fields
   if (childName) appt.childName = String(childName).trim();
   if (childGender) (appt as any).childGender = childGender;
@@ -1737,6 +2150,9 @@ apiRouter.put('/parents/:parentId/children/:childId', (req, res) => {
 apiRouter.post('/reception/check-in', (req, res) => {
   const { appointmentId, paymentMethod, heightCm, weightKg, temperatureF, pulseRate } = req.body;
   const result = schedulingService.checkInPaymentReceived(appointmentId, paymentMethod);
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
   if (result.success && (heightCm || weightKg || temperatureF || pulseRate)) {
     const state = db.getState();
     const appt = state.appointments.find((a) => a.id === appointmentId);
@@ -1779,6 +2195,9 @@ apiRouter.post('/reception/check-in', (req, res) => {
 apiRouter.post('/reception/send-to-doctor', (req, res) => {
   const { appointmentId } = req.body;
   const result = schedulingService.sendToDoctor(appointmentId);
+  if (!result.success) {
+    return res.status(409).json(result);
+  }
   res.json(result);
 });
 
@@ -1801,7 +2220,10 @@ apiRouter.post('/reception/reassign', (req, res) => {
 });
 
 apiRouter.post('/reception/emergency', (req, res) => {
-  const result = schedulingService.insertEmergencyAdjustment(req.body);
+  const result = schedulingService.insertEmergencyAdjustment({
+    ...req.body,
+    hospitalId: req.body.hospitalId || req.query.hospitalId,
+  });
   res.json(result);
 });
 
@@ -1856,9 +2278,15 @@ apiRouter.post('/reception/unblock-patient', (req, res) => {
   res.json(result);
 });
 
+apiRouter.post('/reception/cancel-appointment', (req, res) => {
+  const { appointmentId, reason } = req.body;
+  const result = schedulingService.cancelIndividualAppointment(appointmentId, reason);
+  res.json(result);
+});
+
 apiRouter.post('/reception/cancel-session', (req, res) => {
-  const { doctorId, branchId, reason } = req.body;
-  const result = schedulingService.cancelDoctorSession(doctorId, branchId, reason);
+  const { doctorId, branchId, reason, date } = req.body;
+  const result = schedulingService.cancelDoctorSession(doctorId, branchId, reason, date);
   res.json(result);
 });
 
@@ -1871,21 +2299,27 @@ apiRouter.get('/queue/live', (req, res) => {
   const targetDate = isAllDates ? '' : String(date || state.config.simulatedDate);
   const isAllDoctors = !doctorId || doctorId === 'all';
 
-  if (!isAllDoctors && branchId && targetDate) {
-    schedulingService.ensureDoctorSession(String(doctorId), String(branchId) as BranchId, targetDate);
-    schedulingService.recalculateSessionQueue(String(doctorId), String(branchId) as BranchId, targetDate);
-  } else if (isAllDoctors && branchId && targetDate) {
+  const effectiveBranch = (branchId as BranchId) || state.doctors.find((d) => d.id === doctorId)?.branches[0] || 'main';
+
+  if (!isAllDoctors && targetDate) {
+    schedulingService.ensureDoctorSession(String(doctorId), effectiveBranch, targetDate);
+    schedulingService.recalculateSessionQueue(String(doctorId), effectiveBranch, targetDate);
+  } else if (isAllDoctors && targetDate) {
     state.doctors.forEach((d) => {
-      schedulingService.ensureDoctorSession(d.id, String(branchId) as BranchId, targetDate);
-      schedulingService.recalculateSessionQueue(d.id, String(branchId) as BranchId, targetDate);
+      const docBranch = (branchId as BranchId) || d.branches[0] || 'main';
+      schedulingService.ensureDoctorSession(d.id, docBranch, targetDate);
+      schedulingService.recalculateSessionQueue(d.id, docBranch, targetDate);
     });
   }
 
   let session = isAllDoctors
-    ? state.sessions.find((s) => s.branchId === branchId && s.date === (targetDate || state.config.simulatedDate) && (!hospitalId || (s.hospitalId || 'hosp_sdch') === hospitalId))
-    : state.sessions.find(
-        (s) => s.doctorId === doctorId && s.branchId === branchId && s.date === (targetDate || state.config.simulatedDate) && (!hospitalId || (s.hospitalId || 'hosp_sdch') === hospitalId)
-      );
+    ? (state.sessions.find((s) => (!hospitalId || (s.hospitalId || 'hosp_sdch') === hospitalId) && s.date === (targetDate || state.config.simulatedDate) && (!branchId || s.branchId === branchId))
+       || state.sessions.find((s) => (!hospitalId || (s.hospitalId || 'hosp_sdch') === hospitalId) && s.date === (targetDate || state.config.simulatedDate)))
+    : (state.sessions.find(
+        (s) => s.doctorId === doctorId && (!branchId || s.branchId === branchId) && s.date === (targetDate || state.config.simulatedDate) && (!hospitalId || (s.hospitalId || 'hosp_sdch') === hospitalId)
+      ) || state.sessions.find(
+        (s) => s.doctorId === doctorId && s.date === (targetDate || state.config.simulatedDate)
+      ));
 
   if (!session && branchId) {
     const defaultDocId = isAllDoctors ? (state.doctors.find((d) => !hospitalId || (d.hospitalId || 'hosp_sdch') === hospitalId)?.id || 'dr-subba-rao') : String(doctorId);
@@ -1897,14 +2331,20 @@ apiRouter.get('/queue/live', (req, res) => {
   }
 
   const appointments = state.appointments
-    .filter(
-      (a) =>
-        (!hospitalId || (a.hospitalId || 'hosp_sdch') === hospitalId) &&
+    .filter((a) => {
+      const aDoc = state.doctors.find((d) => d.id === a.doctorId);
+      const aHospId =
+        a.hospitalId && a.hospitalId !== 'hosp_sdch'
+          ? a.hospitalId
+          : (aDoc?.hospitalId || a.hospitalId || 'hosp_sdch');
+      return (
+        (!hospitalId || aHospId === hospitalId) &&
         (isAllDoctors || a.doctorId === doctorId) &&
-        (!branchId || a.branchId === branchId) &&
+        (!branchId || a.branchId === branchId || (isAllDoctors && (!hospitalId || aHospId === hospitalId))) &&
         (isAllDates || a.date === targetDate) &&
         a.status !== 'RESCHEDULED'
-    )
+      );
+    })
     .sort((a, b) => a.date.localeCompare(b.date) || timeToMinutes(a.bookedTime) - timeToMinutes(b.bookedTime));
 
   const currentPatient = appointments.find((a) => a.status === 'WITH_DOCTOR');
@@ -1917,11 +2357,15 @@ apiRouter.get('/queue/live', (req, res) => {
     currentPatient,
     nextPatient: waitingPatients[0] || upcomingPatients[0] || null,
     waitingCount: waitingPatients.length,
+    arrivedWaitingCount: waitingPatients.length,
+    upcomingNotArrivedCount: upcomingPatients.length,
     remainingCount: waitingPatients.length + upcomingPatients.length + (currentPatient ? 1 : 0),
     completedCount: completedPatients.length,
     appointments,
     simulatedTime: state.config.simulatedTime,
     simulatedDate: state.config.simulatedDate,
+    targetDate,
+    requestedDate: date || state.config.simulatedDate,
   });
 });
 
@@ -2039,6 +2483,7 @@ apiRouter.post('/simulation/doctor-delay', (req, res) => {
   );
 
   if (session) {
+    session.manualDelayMinutes = Number(delayMinutes);
     session.currentDelayMinutes = Number(delayMinutes);
     schedulingService.recalculateSessionQueue(doctorId, branchId, state.config.simulatedDate);
     db.persistState();
@@ -2054,11 +2499,19 @@ apiRouter.post('/simulation/trigger-scenario', (req, res) => {
 
   switch (scenarioId) {
     case 'doctor-late-15': {
-      const session = state.sessions.find((s) => s.doctorId === 'dr-subba-rao');
+      const targetDoctorId = req.body.doctorId || (state.sessions.find((s) => s.date === today)?.doctorId) || 'dr-subba-rao';
+      let session = state.sessions.find((s) => s.doctorId === targetDoctorId && s.date === today);
+      if (!session) {
+        session = state.sessions.find((s) => s.doctorId === targetDoctorId);
+      }
+      if (!session && state.sessions.length > 0) {
+        session = state.sessions[0];
+      }
       if (session) {
-        session.currentDelayMinutes = 15;
-        session.actualStart = '10:15';
-        schedulingService.recalculateSessionQueue('dr-subba-rao', 'kakinada', today);
+        session.currentDelayMinutes = (session.currentDelayMinutes || 0) + 15;
+        session.actualStart = session.actualStart || state.config.simulatedTime || '10:15';
+        schedulingService.recalculateSessionQueue(session.doctorId, session.branchId || 'main', today);
+        db.persistState();
       }
       break;
     }

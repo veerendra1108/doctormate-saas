@@ -78,7 +78,25 @@ export class SchedulingService {
       session = this.ensureDoctorSession(doctorId, branchId, date);
     }
 
-    // Fetch all active appointments for this doctor, branch, and date ordered by booked time
+    // Clear queue positioning and ETA flags on all terminal appointments
+    state.appointments
+      .filter((a) => a.doctorId === doctorId && a.branchId === branchId && a.date === date)
+      .forEach((a) => {
+        if (
+          a.status === 'COMPLETED' ||
+          a.status === 'NO_SHOW' ||
+          a.status === 'SLOT_RELEASED' ||
+          a.status === 'RESCHEDULED' ||
+          a.status === 'HOSPITAL_CANCELLED' ||
+          (a.status as string) === 'CANCELLED'
+        ) {
+          a.childrenAhead = undefined;
+          a.positionInQueue = undefined;
+          a.isNextInQueue = false;
+        }
+      });
+
+    // Fetch all active appointments for this doctor, branch, and date ordered by effective time (reassignedTime or bookedTime)
     const dayAppointments = state.appointments
       .filter(
         (a) =>
@@ -86,9 +104,14 @@ export class SchedulingService {
           a.branchId === branchId &&
           a.date === date &&
           a.status !== 'RESCHEDULED' &&
-          a.status !== 'HOSPITAL_CANCELLED'
+          a.status !== 'HOSPITAL_CANCELLED' &&
+          (a.status as string) !== 'CANCELLED'
       )
-      .sort((a, b) => timeToMinutes(a.bookedTime) - timeToMinutes(b.bookedTime));
+      .sort((a, b) => {
+        const timeA = timeToMinutes(a.reassignedTime || a.bookedTime);
+        const timeB = timeToMinutes(b.reassignedTime || b.bookedTime);
+        return timeA - timeB;
+      });
 
     if (dayAppointments.length === 0) return;
 
@@ -133,21 +156,29 @@ export class SchedulingService {
         doctorAvailableMin = Math.max(simulatedNowMin, scheduledStartMin + delay);
       } else {
         // Doctor has already started today and is currently free between consultations
-        doctorAvailableMin = simulatedNowMin;
-        const nextDueAppt = dayAppointments.find(
-          (a) =>
-            a.status === 'WAITING' ||
-            a.status === 'ARRIVED' ||
-            a.status === 'BOOKED' ||
-            a.status === 'APPROACHING'
-        );
-        if (!nextDueAppt) {
-          session.currentDelayMinutes = 0;
-        } else if (doctorAvailableMin <= timeToMinutes(nextDueAppt.bookedTime)) {
-          session.currentDelayMinutes = 0;
+        const manualDelay = session.manualDelayMinutes || 0;
+        if (manualDelay > 0) {
+          // Explicit manual delay set by receptionist must be retained and applied to downstream slots
+          session.currentDelayMinutes = manualDelay;
+          doctorAvailableMin = simulatedNowMin + manualDelay;
+        } else {
+          doctorAvailableMin = simulatedNowMin;
+          const nextDueAppt = dayAppointments.find(
+            (a) =>
+              a.status === 'WAITING' ||
+              a.status === 'ARRIVED' ||
+              a.status === 'BOOKED' ||
+              a.status === 'APPROACHING'
+          );
+          if (!nextDueAppt) {
+            session.currentDelayMinutes = 0;
+          } else if (doctorAvailableMin <= timeToMinutes(nextDueAppt.bookedTime)) {
+            session.currentDelayMinutes = 0;
+          }
         }
       }
     }
+    session.estimatedAvailabilityTime = minutesToTime(doctorAvailableMin);
 
     // Count waiting/ahead & project queue sequentially
     let waitingAheadCounter = 0;
@@ -161,7 +192,8 @@ export class SchedulingService {
         appt.status === 'NO_SHOW' ||
         appt.status === 'SLOT_RELEASED' ||
         appt.status === 'RESCHEDULED' ||
-        appt.status === 'HOSPITAL_CANCELLED'
+        appt.status === 'HOSPITAL_CANCELLED' ||
+        (appt.status as string) === 'CANCELLED'
       ) {
         appt.childrenAhead = undefined;
         appt.positionInQueue = undefined;
@@ -176,18 +208,30 @@ export class SchedulingService {
         return;
       }
 
+      const targetTimeStr = appt.reassignedTime || appt.bookedTime;
+      const targetMin = timeToMinutes(targetTimeStr);
       const bookedMin = timeToMinutes(appt.bookedTime);
 
       // Earliest possible start:
       // 1) On today's queue: cannot start in the past (>= simulatedNowMin)
       // 2) On future queues: not bounded by today's simulated clock
-      // 3) Cannot start before booked time (scheduled slot)
+      // 3) Cannot start before target time (reassigned time or scheduled slot)
       // 4) Cannot start before doctor availability / previous patient completion
       let expectedStartMin: number;
-      if (isToday) {
-        expectedStartMin = Math.max(simulatedNowMin, bookedMin, nextSlotStartMin);
+      if (appt.reassignedTime) {
+        // DM-R7-012: Explicitly reassigned time must be strictly respected.
+        // Patient cannot be scheduled earlier than the accepted reassigned time.
+        if (isToday) {
+          expectedStartMin = Math.max(simulatedNowMin, targetMin, nextSlotStartMin > targetMin ? nextSlotStartMin : targetMin);
+        } else {
+          expectedStartMin = Math.max(targetMin, nextSlotStartMin > targetMin ? nextSlotStartMin : targetMin);
+        }
       } else {
-        expectedStartMin = Math.max(bookedMin, nextSlotStartMin);
+        if (isToday) {
+          expectedStartMin = Math.max(simulatedNowMin, bookedMin, nextSlotStartMin);
+        } else {
+          expectedStartMin = Math.max(bookedMin, nextSlotStartMin);
+        }
       }
 
       // Chain doctor availability for subsequent patients
@@ -215,16 +259,18 @@ export class SchedulingService {
         appt.isNextInQueue = false;
       }
 
-      // Delay status explanation
+      // Delay status explanation (Section 10 of PDF: avoid misleading automated "critical patient stabilization")
       const effectiveDelay = Math.max(0, expectedStartMin - bookedMin);
-      if (effectiveDelay > 20) {
-        appt.delayExplanation = `Doctor running approximately ${effectiveDelay} minutes late due to critical patient stabilization.`;
+      if (appt.reassignedTime) {
+        appt.delayExplanation = `Consultation time reassigned to ${appt.expectedConsultationTime} by reception desk.`;
+      } else if (session.delayReason) {
+        appt.delayExplanation = `Doctor running approximately ${effectiveDelay} minutes late: ${session.delayReason}`;
       } else if (effectiveDelay > 5) {
         appt.delayExplanation = `Doctor running approximately ${effectiveDelay} minutes behind schedule.`;
       } else if (expectedStartMin < bookedMin) {
         appt.delayExplanation = `Doctor is running slightly ahead of schedule. Early consultation may be possible if you arrive.`;
       } else {
-        appt.delayExplanation = `Doctor running approximately on time.`;
+        appt.delayExplanation = `Doctor running approximately on schedule.`;
       }
 
       // Check notification triggers: if 2 children ahead and within notification preference
@@ -246,36 +292,66 @@ export class SchedulingService {
   /**
    * Generates available slots for a doctor on a given date at a branch.
    */
-  public getAvailableSlots(doctorId: string, branchId: BranchId, dateStr: string): SlotAvailability[] {
+  public getAvailableSlots(
+    doctorId: string,
+    branchId: BranchId,
+    dateStr: string,
+    excludeAppointmentId?: string
+  ): SlotAvailability[] {
     const state = db.getState();
     const parts = dateStr.split('-').map(Number);
     const dayOfWeek = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2]).getDay() : new Date(dateStr).getDay();
 
     const doctorObj = state.doctors.find((d) => d.id === doctorId);
+    if (!doctorObj) return [];
 
-    // Find schedule - match by doctorId and branchId if provided, or fallback to doctor's schedule
+    const isDayIncluded = (days: number[] | undefined, dow: number): boolean => {
+      if (!Array.isArray(days) || days.length === 0) return true;
+      if (dow === 0) return days.includes(0) || days.includes(7);
+      return days.includes(dow);
+    };
+
+    // Check doctor profile working days (0=Sunday/7=Sunday, 1=Monday, ..., 6=Saturday)
+    if (Array.isArray(doctorObj.availableDays) && !isDayIncluded(doctorObj.availableDays, dayOfWeek)) {
+      return [];
+    }
+
+    // Find schedule specifically for this doctor, branch, and dayOfWeek
     let schedule = state.schedules.find(
-      (s) => s.doctorId === doctorId && (s.branchId === branchId || !branchId) && s.daysOfWeek.includes(dayOfWeek) && s.isAvailable
+      (s) => s.doctorId === doctorId && (s.branchId === branchId || !branchId) && isDayIncluded(s.daysOfWeek, dayOfWeek) && s.isAvailable
     ) || state.schedules.find(
-      (s) => s.doctorId === doctorId && s.daysOfWeek.includes(dayOfWeek) && s.isAvailable
-    ) || state.schedules.find(
-      (s) => s.doctorId === doctorId && s.isAvailable
+      (s) => s.doctorId === doctorId && isDayIncluded(s.daysOfWeek, dayOfWeek) && s.isAvailable
     );
 
     if (!schedule) {
-      if (!doctorObj) return [];
+      // If doctor has defined schedules, none matched dayOfWeek or isAvailable was false
+      const doctorSchedules = state.schedules.filter((s) => s.doctorId === doctorId);
+      if (doctorSchedules.length > 0) {
+        return [];
+      }
+
+      // Fallback only if no schedules exist at all for this doctor in database
+      const allowedDays = doctorObj.availableDays || [1, 2, 3, 4, 5, 6];
+      if (!isDayIncluded(allowedDays, dayOfWeek)) {
+        return [];
+      }
+
       schedule = {
         id: `sch_${doctorId}`,
         hospitalId: doctorObj.hospitalId,
         doctorId: doctorId,
         branchId: branchId || doctorObj.branches[0] || 'main',
-        daysOfWeek: doctorObj.availableDays || [0, 1, 2, 3, 4, 5, 6],
+        daysOfWeek: allowedDays,
         startTime: '09:00',
         endTime: '17:00',
         slotDurationMinutes: doctorObj.slotDurationMinutes || 15,
         bufferMinutesPerHour: 10,
         isAvailable: true,
       };
+    }
+
+    if (!schedule.isAvailable || !isDayIncluded(schedule.daysOfWeek, dayOfWeek)) {
+      return [];
     }
 
     // Authoritative slot duration from doctor profile
@@ -286,14 +362,18 @@ export class SchedulingService {
     const endMinutes = timeToMinutes(schedule.endTime || '17:00');
     const bufferMinutes = schedule.bufferMinutesPerHour !== undefined ? schedule.bufferMinutesPerHour : 10;
 
-    // Existing active bookings for this date and doctor
+    // Existing active bookings for this date and doctor (excluding terminal/released statuses)
     const existingBookings = state.appointments.filter(
       (a) =>
         a.doctorId === doctorId &&
         a.date === dateStr &&
+        a.id !== excludeAppointmentId &&
+        a.appointmentNumber !== excludeAppointmentId &&
         a.status !== 'RESCHEDULED' &&
         a.status !== 'SLOT_RELEASED' &&
-        a.status !== 'HOSPITAL_CANCELLED'
+        a.status !== 'HOSPITAL_CANCELLED' &&
+        a.status !== 'NO_SHOW' &&
+        (a.status as string) !== 'CANCELLED'
     );
 
     const slots: SlotAvailability[] = [];
@@ -341,6 +421,69 @@ export class SchedulingService {
     }
 
     return slots;
+  }
+
+  /**
+   * Validates whether a requested slot is within offered doctor hours and currently available
+   */
+  public validateSlotForBookingOrReschedule(params: {
+    doctorId: string;
+    branchId: BranchId;
+    date: string;
+    bookedTime: string;
+    excludeAppointmentId?: string;
+  }): { valid: boolean; status: number; message?: string } {
+    const state = db.getState();
+    const doctor = state.doctors.find((d) => d.id === params.doctorId);
+    if (!doctor) {
+      return { valid: false, status: 404, message: 'Doctor not found.' };
+    }
+
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(params.bookedTime)) {
+      return { valid: false, status: 400, message: `Invalid time slot format: ${params.bookedTime}. Expected HH:MM.` };
+    }
+
+    const availableSlots = this.getAvailableSlots(
+      params.doctorId,
+      params.branchId,
+      params.date,
+      params.excludeAppointmentId
+    );
+
+    if (availableSlots.length === 0) {
+      return {
+        valid: false,
+        status: 400,
+        message: `${doctor.name} has no available consultation schedule on ${params.date}.`,
+      };
+    }
+
+    const slot = availableSlots.find((s) => s.time === params.bookedTime);
+    if (!slot) {
+      return {
+        valid: false,
+        status: 400,
+        message: `Slot ${params.bookedTime} is outside ${doctor.name}'s offered consultation hours on ${params.date}.`,
+      };
+    }
+
+    if (slot.isBufferSlot || slot.status === 'Buffer') {
+      return {
+        valid: false,
+        status: 400,
+        message: `Slot ${params.bookedTime} is reserved as an OPD buffer/break period and cannot be booked or rescheduled to.`,
+      };
+    }
+
+    if (!slot.available || slot.status === 'Booked') {
+      return {
+        valid: false,
+        status: 409,
+        message: `Slot ${params.bookedTime} is already occupied by another patient on ${params.date}.`,
+      };
+    }
+
+    return { valid: true, status: 200 };
   }
 
   /**
@@ -399,7 +542,9 @@ export class SchedulingService {
         a.bookedTime === params.bookedTime &&
         a.status !== 'RESCHEDULED' &&
         a.status !== 'SLOT_RELEASED' &&
-        a.status !== 'HOSPITAL_CANCELLED'
+        a.status !== 'HOSPITAL_CANCELLED' &&
+        a.status !== 'NO_SHOW' &&
+        (a.status as string) !== 'CANCELLED'
     );
 
     if (conflict) {
@@ -417,6 +562,44 @@ export class SchedulingService {
 
     const doctor = state.doctors.find((d) => d.id === params.doctorId);
     if (!doctor) return { success: false, message: 'Doctor not found.' };
+
+    // Verify doctor is scheduled to consult on this day of week
+    const datePartsParsed = params.date.split('-').map(Number);
+    const bookingDayOfWeek = datePartsParsed.length === 3
+      ? new Date(datePartsParsed[0], datePartsParsed[1] - 1, datePartsParsed[2]).getDay()
+      : new Date(params.date).getDay();
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    const isDayIncluded = (days: number[] | undefined, dow: number): boolean => {
+      if (!Array.isArray(days) || days.length === 0) return true;
+      if (dow === 0) return days.includes(0) || days.includes(7);
+      return days.includes(dow);
+    };
+
+    if (Array.isArray(doctor.availableDays) && !isDayIncluded(doctor.availableDays, bookingDayOfWeek)) {
+      return {
+        success: false,
+        message: `${doctor.name} is not scheduled for consultations on ${dayNames[bookingDayOfWeek]}s.`,
+      };
+    }
+
+    const availableSlots = this.getAvailableSlots(params.doctorId, params.branchId, params.date);
+    if (availableSlots.length === 0) {
+      return {
+        success: false,
+        message: `${doctor.name} has no consultation schedule on ${params.date} (${dayNames[bookingDayOfWeek]}).`,
+      };
+    }
+
+    const requestedSlot = availableSlots.find((s) => s.time === params.bookedTime);
+    if (!requestedSlot || !requestedSlot.available) {
+      return {
+        success: false,
+        message: requestedSlot?.isBufferSlot
+          ? 'This slot is reserved as a hospital buffer/break period and cannot be booked.'
+          : 'Selected appointment slot is not available.',
+      };
+    }
 
     const branch = state.branches.find((b) => b.id === params.branchId);
     if (!branch) return { success: false, message: 'Branch not found.' };
@@ -509,23 +692,19 @@ export class SchedulingService {
       };
     }
 
-    // Check slot availability
-    const conflict = state.appointments.find(
-      (a) =>
-        a.doctorId === appt.doctorId &&
-        a.branchId === appt.branchId &&
-        a.date === targetDate &&
-        a.bookedTime === newBookedTime &&
-        a.id !== appt.id &&
-        a.status !== 'RESCHEDULED' &&
-        a.status !== 'SLOT_RELEASED' &&
-        a.status !== 'HOSPITAL_CANCELLED'
-    );
+    // Check slot availability and offered schedule range (DM-R7-009)
+    const slotValidation = this.validateSlotForBookingOrReschedule({
+      doctorId: appt.doctorId,
+      branchId: appt.branchId,
+      date: targetDate,
+      bookedTime: newBookedTime,
+      excludeAppointmentId: appt.id,
+    });
 
-    if (conflict) {
+    if (!slotValidation.valid) {
       return {
         success: false,
-        message: 'The selected slot is no longer available. Please choose another time.',
+        message: slotValidation.message,
       };
     }
 
@@ -562,6 +741,15 @@ export class SchedulingService {
     const appt = state.appointments.find((a) => a.id === appointmentId);
     if (!appt) return { success: false, message: 'Appointment not found' };
 
+    // DM-R7-010: Cancelled or terminal appointments cannot re-enter active queue via payment
+    const terminalStatuses = ['CANCELLED', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED', 'NO_SHOW', 'COMPLETED', 'RESCHEDULED'];
+    if (terminalStatuses.includes(appt.status)) {
+      return {
+        success: false,
+        message: `Cannot check in or receive payment for appointment with status "${appt.status.replace('_', ' ')}". Cancelled or completed appointments cannot re-enter the queue.`,
+      };
+    }
+
     appt.paymentStatus = 'PAID';
     appt.paymentMethod = paymentMethod;
     appt.status = 'WAITING';
@@ -586,6 +774,26 @@ export class SchedulingService {
     const state = db.getState();
     const appt = state.appointments.find((a) => a.id === appointmentId);
     if (!appt) return { success: false, message: 'Appointment not found' };
+
+    // Terminal or cancelled appointments cannot enter consultation
+    const terminalStatuses = ['COMPLETED', 'NO_SHOW', 'HOSPITAL_CANCELLED', 'SLOT_RELEASED', 'RESCHEDULED', 'CANCELLED'];
+    if (terminalStatuses.includes(appt.status)) {
+      return {
+        success: false,
+        message: `Cannot start consultation for appointment with status "${appt.status.replace('_', ' ')}".`,
+      };
+    }
+
+    // DM-R7-007: Enforce strictly one active consultation per doctor/date
+    const activeAppt = state.appointments.find(
+      (a) => a.doctorId === appt.doctorId && a.date === appt.date && a.status === 'WITH_DOCTOR' && a.id !== appt.id
+    );
+    if (activeAppt) {
+      return {
+        success: false,
+        message: `Doctor is currently consulting with patient ${activeAppt.childName} (Token #${activeAppt.appointmentNumber}). Please complete active consultation before admitting another patient.`,
+      };
+    }
 
     // Update doctor session
     const session = state.sessions.find(
@@ -696,15 +904,34 @@ export class SchedulingService {
     const appt = state.appointments.find((a) => a.id === appointmentId);
     if (!appt) return { success: false, message: 'Appointment not found' };
 
+    // Prevent reassigning terminal appointments
+    if (['COMPLETED', 'HOSPITAL_CANCELLED', 'RESCHEDULED'].includes(appt.status)) {
+      return { success: false, message: `Cannot reassign appointment with status ${appt.status}` };
+    }
+
     appt.status = 'WAITING';
-    if (newPositionOrTime) {
+    if (newPositionOrTime && /^\d{1,2}:\d{2}$/.test(newPositionOrTime.trim())) {
+      const [h, m] = newPositionOrTime.trim().split(':');
+      const formatted = `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+      appt.reassignedTime = formatted;
+      appt.expectedConsultationTime = formatted;
+      appt.recommendedArrivalTime = minutesToTime(
+        Math.max(0, timeToMinutes(formatted) - state.config.arrivalBeforeAppointmentMinutes)
+      );
+    } else if (newPositionOrTime && newPositionOrTime !== 'Next available') {
       appt.expectedConsultationTime = newPositionOrTime;
     }
-    appt.delayExplanation = 'Your original appointment time has passed. Reception has assigned the next available consultation position.';
+
+    appt.delayExplanation = appt.reassignedTime
+      ? `Consultation time reassigned to ${appt.reassignedTime} by reception desk.`
+      : 'Your original appointment time has passed. Reception has assigned the next available consultation position.';
+
     appt.history.push({
       timestamp: `${state.config.simulatedDate} ${state.config.simulatedTime}`,
       status: 'WAITING',
-      note: 'Reassigned to active queue by reception',
+      note: appt.reassignedTime
+        ? `Reassigned to ${appt.reassignedTime} by reception`
+        : 'Reassigned to active queue by reception',
     });
     appt.updatedAt = new Date().toISOString();
 
@@ -844,45 +1071,76 @@ export class SchedulingService {
    * Inserts emergency patient, consumes buffer capacity, recalculates downstream ETAs
    */
   public insertEmergencyAdjustment(params: {
+    hospitalId?: string;
     doctorId: string;
-    branchId: BranchId;
+    branchId?: BranchId;
     childName: string;
     parentName: string;
     parentMobile: string;
   }): { success: boolean; appointment?: Appointment } {
     const state = db.getState();
-    const session = state.sessions.find(
-      (s) => s.doctorId === params.doctorId && s.branchId === params.branchId && s.date === state.config.simulatedDate
+    const effectiveDoctorId =
+      !params.doctorId || params.doctorId === 'all'
+        ? (state.doctors.find((d) => !params.hospitalId || (d.hospitalId || 'hosp_sdch') === params.hospitalId)?.id || 'dr-subba-rao')
+        : params.doctorId;
+
+    const doctor = state.doctors.find((d) => d.id === effectiveDoctorId);
+    const targetHospitalId = params.hospitalId || doctor?.hospitalId || 'hosp_sdch';
+    const hospital = state.hospitals.find((h) => h.id === targetHospitalId);
+    const targetBranchId =
+      params.branchId ||
+      doctor?.branches[0] ||
+      state.branches.find((b) => (b.hospitalId || 'hosp_sdch') === targetHospitalId)?.id ||
+      'main';
+    const branch = state.branches.find((b) => b.id === targetBranchId);
+
+    let session = state.sessions.find(
+      (s) => s.doctorId === effectiveDoctorId && s.date === state.config.simulatedDate
     );
 
-    if (session) {
-      session.emergencyAdjustmentCount += 1;
-      // Consume 15 mins of buffer
-      session.bufferAvailableMinutes = Math.max(0, session.bufferAvailableMinutes - 15);
-      session.currentDelayMinutes += 15; // Propagate 15m delay to downstream
+    if (!session) {
+      session = this.ensureDoctorSession(effectiveDoctorId, targetBranchId, state.config.simulatedDate);
+      session.hospitalId = targetHospitalId;
     }
 
-    const doctor = state.doctors.find((d) => d.id === params.doctorId);
-    const branch = state.branches.find((b) => b.id === params.branchId);
+    if (session) {
+      session.emergencyAdjustmentCount = (session.emergencyAdjustmentCount || 0) + 1;
+      // Consume 15 mins of buffer (DM-R7-008: preserve valid 0, don't revert to default)
+      const currentBuffer = typeof session.bufferAvailableMinutes === 'number' ? session.bufferAvailableMinutes : 20;
+      session.bufferAvailableMinutes = Math.max(0, currentBuffer - 15);
+      session.currentDelayMinutes = (session.currentDelayMinutes || 0) + 15; // Propagate 15m delay to downstream
+    }
 
-    const emgBranchInitial = params.branchId === 'kakinada' ? 'K' : 'P';
+    const hospPrefix = hospital?.slug
+      ? hospital.slug.substring(0, 4).toUpperCase()
+      : (targetHospitalId === 'hosp_sdch' ? 'SDCH' : 'HOSP');
     const [yyyy, mm, dd] = state.config.simulatedDate.split('-');
     const yy = (yyyy || '2026').slice(-2);
     const ddmmyy = `${dd || '01'}${mm || '01'}${yy}`;
     const timeCode = (state.config.simulatedTime || '00:00').replace(':', '');
 
+    const baseEmergencyToken = `DM-${hospPrefix}-${ddmmyy}-${timeCode}-EMG`;
+    const existingMatches = state.appointments.filter(
+      (a) => a.appointmentNumber === baseEmergencyToken || a.appointmentNumber.startsWith(`${baseEmergencyToken}-`)
+    );
+    const appointmentNumber = existingMatches.length > 0
+      ? `${baseEmergencyToken}-${existingMatches.length + 1}`
+      : baseEmergencyToken;
+
     const emergencyAppt: Appointment = {
-      id: `apt-emg-${Date.now()}`,
-      appointmentNumber: `SD-${emgBranchInitial}-${ddmmyy}-${timeCode}-EMG`,
+      id: `apt-emg-${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      appointmentNumber,
       childId: `c-emg-${Date.now()}`,
       childName: params.childName || 'Emergency Pediatric Patient',
       parentId: 'p-emg',
       parentName: params.parentName || 'Attending Guardian',
       parentMobile: params.parentMobile || '9999999999',
-      doctorId: params.doctorId,
+      doctorId: effectiveDoctorId,
       doctorName: doctor?.name || 'Pediatric Specialist',
-      branchId: params.branchId,
-      branchName: branch?.name || 'Hospital Clinic',
+      branchId: targetBranchId,
+      branchName: branch?.name || hospital?.name || 'Hospital Clinic',
+      hospitalId: targetHospitalId,
+      hospitalName: hospital?.name || 'Doctormate Hospital',
       date: state.config.simulatedDate,
       bookedTime: state.config.simulatedTime,
       expectedConsultationTime: state.config.simulatedTime,
@@ -906,37 +1164,82 @@ export class SchedulingService {
     };
 
     state.appointments.push(emergencyAppt);
-    this.recalculateSessionQueue(params.doctorId, params.branchId, state.config.simulatedDate);
+    this.recalculateSessionQueue(effectiveDoctorId, targetBranchId, state.config.simulatedDate);
     db.persistState();
 
     return { success: true, appointment: emergencyAppt };
   }
 
   /**
-   * Hospital-Caused Session Cancellation
+   * Cancel an individual appointment from the reception desk
    */
-  public cancelDoctorSession(doctorId: string, branchId: BranchId, reason?: string): { success: boolean; affectedCount: number } {
+  public cancelIndividualAppointment(appointmentId: string, reason?: string): { success: boolean; appointment?: Appointment } {
     const state = db.getState();
-    const session = state.sessions.find(
-      (s) => s.doctorId === doctorId && s.branchId === branchId && s.date === state.config.simulatedDate
+    const appt = state.appointments.find((a) => a.id === appointmentId || a.appointmentNumber === appointmentId);
+    if (!appt) return { success: false };
+
+    appt.status = 'HOSPITAL_CANCELLED';
+    appt.childrenAhead = undefined;
+    appt.positionInQueue = undefined;
+    appt.isNextInQueue = false;
+    appt.history.push({
+      timestamp: `${state.config.simulatedDate} ${state.config.simulatedTime}`,
+      status: 'HOSPITAL_CANCELLED',
+      note: reason || 'Cancelled by hospital reception',
+    });
+    appt.updatedAt = new Date().toISOString();
+
+    const doctor = state.doctors.find((d) => d.id === appt.doctorId);
+    this.sendSimulatedNotification(
+      appt,
+      'Appointment Cancelled by Hospital',
+      `Your consultation with ${doctor?.name || 'the doctor'} scheduled for ${appt.bookedTime} on ${appt.date} has been cancelled by the hospital. Reason: "${reason || 'Operational contingency'}". Please check available appointments or contact reception for rebooking.`
     );
 
-    if (session) {
+    this.recalculateSessionQueue(appt.doctorId, appt.branchId, appt.date);
+    db.persistState();
+
+    return { success: true, appointment: appt };
+  }
+
+  /**
+   * Hospital-Caused Session Cancellation
+   */
+  public cancelDoctorSession(
+    doctorId: string,
+    branchId?: BranchId,
+    reason?: string,
+    date?: string
+  ): { success: boolean; affectedCount: number } {
+    const state = db.getState();
+    const targetDate = String(date || state.config.simulatedDate);
+    const isAllDoctors = !doctorId || doctorId === 'all';
+
+    const matchingSessions = state.sessions.filter(
+      (s) =>
+        (isAllDoctors || s.doctorId === doctorId) &&
+        (!branchId || s.branchId === branchId) &&
+        s.date === targetDate
+    );
+
+    matchingSessions.forEach((session) => {
       session.status = 'CANCELLED_BY_HOSPITAL';
       session.cancellationNotice = reason || 'Emergency operational contingency';
-    }
+    });
 
-    const doctor = state.doctors.find((d) => d.id === doctorId);
     const affectedAppointments = state.appointments.filter(
       (a) =>
-        a.doctorId === doctorId &&
-        a.branchId === branchId &&
-        a.date === state.config.simulatedDate &&
+        (isAllDoctors || a.doctorId === doctorId) &&
+        (!branchId || a.branchId === branchId || isAllDoctors) &&
+        a.date === targetDate &&
         ['BOOKED', 'APPROACHING', 'ARRIVED', 'WAITING'].includes(a.status)
     );
 
     affectedAppointments.forEach((appt) => {
       appt.status = 'HOSPITAL_CANCELLED';
+      appt.childrenAhead = undefined;
+      appt.positionInQueue = undefined;
+      appt.isNextInQueue = false;
       appt.history.push({
         timestamp: `${state.config.simulatedDate} ${state.config.simulatedTime}`,
         status: 'HOSPITAL_CANCELLED',
@@ -944,12 +1247,18 @@ export class SchedulingService {
       });
       appt.updatedAt = new Date().toISOString();
 
+      const doctor = state.doctors.find((d) => d.id === appt.doctorId);
       this.sendSimulatedNotification(
         appt,
-        'Hospital Notice - Session Rescheduled',
-        `Unfortunately today's consultation with ${doctor?.name || 'the doctor'} has been cancelled by the hospital. We apologise for the inconvenience. Please check available appointments or contact reception.`
+        'Hospital Notice - Session Cancelled',
+        `Unfortunately your consultation with ${doctor?.name || 'the doctor'} on ${targetDate} has been cancelled by the hospital. We apologise for the inconvenience. Please check available appointments or contact reception.`
       );
     });
+
+    // Recalculate sessions affected
+    if (!isAllDoctors && branchId) {
+      this.recalculateSessionQueue(doctorId, branchId, targetDate);
+    }
 
     db.persistState();
     return { success: true, affectedCount: affectedAppointments.length };

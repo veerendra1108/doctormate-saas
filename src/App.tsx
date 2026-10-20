@@ -33,6 +33,7 @@ import { HospitalRegistrationModal } from './components/HospitalRegistrationModa
 import { HospitalOnboardingWizard } from './components/HospitalOnboardingWizard.js';
 import { HospitalAdminDashboard } from './components/HospitalAdminDashboard.js';
 import { HospitalLoginModal } from './components/HospitalLoginModal.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 
 function parseLocation(): { tab: string; slug?: string; token?: string } {
   if (typeof window === 'undefined') return { tab: 'saas-home' };
@@ -56,7 +57,22 @@ function parseLocation(): { tab: string; slug?: string; token?: string } {
     return { tab: 'hospital-admin' };
   }
 
-  // 4. Saved activeTab if loaded at root
+  // 4. Direct reception URL
+  if (path === '/reception' || path === '/reception-desk') {
+    return { tab: 'reception-desk' };
+  }
+
+  // 5. Direct doctor URL
+  if (path === '/doctor' || path === '/doctor-desk') {
+    return { tab: 'doctor-desk' };
+  }
+
+  // 6. Direct parent portal URL
+  if (path === '/portal' || path === '/parent-portal') {
+    return { tab: 'parent-portal' };
+  }
+
+  // 7. Saved activeTab if loaded at root or reloaded
   const saved = localStorage.getItem('doctormate_active_tab');
   const validTabs = [
     'doctor-desk',
@@ -66,7 +82,7 @@ function parseLocation(): { tab: string; slug?: string; token?: string } {
     'hospital-booking',
     'track-appointment',
   ];
-  if (saved && validTabs.includes(saved) && path === '/') {
+  if (saved && validTabs.includes(saved) && (path === '/' || path === '')) {
     return { tab: saved };
   }
 
@@ -97,7 +113,10 @@ export default function App() {
     doctor: Doctor;
     account: DoctorAccount;
     token: string;
-  } | null>(null);
+  } | null>(() => {
+    const saved = localStorage.getItem('doctormate_doctor_session');
+    return saved ? JSON.parse(saved) : null;
+  });
 
   // Hospital Admin session
   const [hospitalAdmin, setHospitalAdmin] = useState<{
@@ -136,17 +155,21 @@ export default function App() {
   const [schedules, setSchedules] = useState<DoctorSchedule[]>([]);
   const [gallery, setGallery] = useState<GalleryItem[]>([]);
   const [reviews, setReviews] = useState<HospitalReview[]>([]);
-  const [config, setConfig] = useState<SystemConfiguration>({
-    simulatedTime: '10:30',
-    simulatedDate: new Date().toLocaleDateString('en-CA'),
-    isSimulating: false,
-    slotDurationMinutes: 15,
-    bufferFrequencySlots: 4,
-    bufferDurationMinutes: 15,
-    reportingTimeMinutesBeforeSlot: 15,
-    rescheduleCutoffMinutes: 60,
-    notificationThresholdMinutes: 30,
-    activeScenario: null,
+  const [config, setConfig] = useState<SystemConfiguration>(() => {
+    const cachedDate = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null;
+    const cachedTime = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_time') : null;
+    return {
+      simulatedTime: cachedTime || '10:30',
+      simulatedDate: cachedDate || new Date().toLocaleDateString('en-CA'),
+      isSimulating: false,
+      slotDurationMinutes: 15,
+      bufferFrequencySlots: 4,
+      bufferDurationMinutes: 15,
+      reportingTimeMinutesBeforeSlot: 15,
+      rescheduleCutoffMinutes: 60,
+      notificationThresholdMinutes: 30,
+      activeScenario: null,
+    };
   });
 
   // Listen for browser Back/Forward popstate events
@@ -217,6 +240,12 @@ export default function App() {
         if (res.ok) {
           const cfg = await res.json();
           if (cfg && cfg.simulatedTime) {
+            if (cfg.simulatedDate) {
+              localStorage.setItem('doctormate_simulated_date', cfg.simulatedDate);
+            }
+            if (cfg.simulatedTime) {
+              localStorage.setItem('doctormate_simulated_time', cfg.simulatedTime);
+            }
             setConfig((prev) => {
               if (
                 prev.simulatedTime !== cfg.simulatedTime ||
@@ -233,6 +262,8 @@ export default function App() {
       }
     };
 
+    // Execute immediately on mount to prevent initial stale clock display
+    syncHospitalClock();
     const syncInterval = setInterval(syncHospitalClock, 4000);
     return () => clearInterval(syncInterval);
   }, []);
@@ -264,7 +295,15 @@ export default function App() {
         if (Array.isArray(data.schedules)) setSchedules(data.schedules);
         if (Array.isArray(data.gallery)) setGallery(data.gallery);
         if (Array.isArray(data.reviews)) setReviews(data.reviews);
-        if (data.config && data.config.simulatedTime) setConfig(data.config);
+        if (data.config && data.config.simulatedTime) {
+          if (data.config.simulatedDate) {
+            localStorage.setItem('doctormate_simulated_date', data.config.simulatedDate);
+          }
+          if (data.config.simulatedTime) {
+            localStorage.setItem('doctormate_simulated_time', data.config.simulatedTime);
+          }
+          setConfig(data.config);
+        }
       }
     } catch (err) {
       console.warn('Initial hospital data fetch error:', err);
@@ -331,6 +370,12 @@ export default function App() {
   };
 
   const handleConfigUpdate = (newConfig: SystemConfiguration) => {
+    if (newConfig.simulatedDate) {
+      localStorage.setItem('doctormate_simulated_date', newConfig.simulatedDate);
+    }
+    if (newConfig.simulatedTime) {
+      localStorage.setItem('doctormate_simulated_time', newConfig.simulatedTime);
+    }
     setConfig(newConfig);
   };
 
@@ -343,9 +388,12 @@ export default function App() {
       });
       const data = await res.json();
       if (data.newTime) {
+        localStorage.setItem('doctormate_simulated_time', data.newTime);
         setConfig((prev) => ({ ...prev, simulatedTime: data.newTime }));
       }
       if (data.config) {
+        if (data.config.simulatedDate) localStorage.setItem('doctormate_simulated_date', data.config.simulatedDate);
+        if (data.config.simulatedTime) localStorage.setItem('doctormate_simulated_time', data.config.simulatedTime);
         setConfig(data.config);
       }
       loadHospitalData();
@@ -364,9 +412,12 @@ export default function App() {
       });
       const data = await res.json();
       if (data.newTime) {
+        localStorage.setItem('doctormate_simulated_time', data.newTime);
         setConfig((prev) => ({ ...prev, simulatedTime: data.newTime }));
       }
       if (data.config) {
+        if (data.config.simulatedDate) localStorage.setItem('doctormate_simulated_date', data.config.simulatedDate);
+        if (data.config.simulatedTime) localStorage.setItem('doctormate_simulated_time', data.config.simulatedTime);
         setConfig(data.config);
       }
       loadHospitalData();
@@ -378,6 +429,7 @@ export default function App() {
 
   const handleSetDate = async (date: string) => {
     try {
+      localStorage.setItem('doctormate_simulated_date', date);
       const res = await fetch('/api/simulation/set-date', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -385,9 +437,12 @@ export default function App() {
       });
       const data = await res.json();
       if (data.newDate) {
+        localStorage.setItem('doctormate_simulated_date', data.newDate);
         setConfig((prev) => ({ ...prev, simulatedDate: data.newDate }));
       }
       if (data.config) {
+        if (data.config.simulatedDate) localStorage.setItem('doctormate_simulated_date', data.config.simulatedDate);
+        if (data.config.simulatedTime) localStorage.setItem('doctormate_simulated_time', data.config.simulatedTime);
         setConfig(data.config);
       }
       loadHospitalData();
@@ -502,6 +557,7 @@ export default function App() {
     }
     localStorage.removeItem('sri_devi_doctor_token');
     localStorage.removeItem('sri_devi_active_tab');
+    localStorage.removeItem('doctormate_doctor_session');
     setDoctorUser(null);
     setActiveTab('saas-home');
   };
@@ -575,6 +631,7 @@ export default function App() {
 
       {/* Main View Switcher */}
       <main className="flex-1">
+        <ErrorBoundary fallbackTitle="Unable to load this dashboard view">
         {activeTab === 'saas-home' ? (
           <DoctormateHome
             onOpenRegister={() => setIsHospitalRegOpen(true)}
@@ -761,6 +818,7 @@ export default function App() {
             </button>
           </div>
         )}
+        </ErrorBoundary>
       </main>
 
       {/* Hospital Registration Modal */}
@@ -813,7 +871,9 @@ export default function App() {
         isOpen={isDoctorLoginOpen}
         onClose={() => setIsDoctorLoginOpen(false)}
         onLoginSuccess={(doctor, account, token) => {
-          setDoctorUser({ doctor, account, token });
+          const session = { doctor, account, token };
+          setDoctorUser(session);
+          localStorage.setItem('doctormate_doctor_session', JSON.stringify(session));
           setActiveTab('doctor-desk');
         }}
       />

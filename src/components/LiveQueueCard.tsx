@@ -34,6 +34,25 @@ export const LiveQueueCard: React.FC<LiveQueueCardProps> = ({
     appointment.advanceNoticePreferenceMinutes || 30
   );
 
+  // PDF Section 7: Track expected time adjustments (improved / updated)
+  const prevExpectedRef = React.useRef(appointment.expectedConsultationTime);
+  const [expectedTrend, setExpectedTrend] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (prevExpectedRef.current && prevExpectedRef.current !== appointment.expectedConsultationTime) {
+      const [prevH, prevM] = prevExpectedRef.current.split(':').map(Number);
+      const [currH, currM] = (appointment.expectedConsultationTime || '00:00').split(':').map(Number);
+      const prevTotal = (prevH || 0) * 60 + (prevM || 0);
+      const currTotal = (currH || 0) * 60 + (currM || 0);
+      if (currTotal < prevTotal) {
+        setExpectedTrend(`Expected time improved from ${prevExpectedRef.current} to ${appointment.expectedConsultationTime}`);
+      } else if (currTotal > prevTotal) {
+        setExpectedTrend(`Expected time updated from ${prevExpectedRef.current} to ${appointment.expectedConsultationTime}`);
+      }
+      prevExpectedRef.current = appointment.expectedConsultationTime;
+    }
+  }, [appointment.expectedConsultationTime]);
+
   // Time calculations
   const [nowHours, nowMins] = config.simulatedTime.split(':').map(Number);
   const nowTotal = nowHours * 60 + nowMins;
@@ -161,75 +180,118 @@ export const LiveQueueCard: React.FC<LiveQueueCardProps> = ({
         </div>
       </div>
 
-      {/* CORE QUEUE METRICS GRID (The high-precision time distinction) */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-5 rounded-2xl bg-slate-50 border border-slate-200/80 my-2">
-        {/* Booked Time */}
-        <div className="p-3 bg-white rounded-xl border border-slate-200/60">
+      {/* CORE QUEUE METRICS GRID (PDF Section 7 - The 3 Times Distinction + Arrival Advice) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 sm:p-5 rounded-2xl bg-slate-50 border border-slate-200/80 my-2">
+        {/* 1. Booked Appointment Time (Preserved & Visible) */}
+        <div className="p-3 bg-white rounded-xl border border-slate-200/60 shadow-2xs">
           <span className="text-[11px] font-medium text-slate-500 block uppercase tracking-wider">
-            Original Booked Time
+            Booked Appointment
           </span>
           <div className="text-xl sm:text-2xl font-black text-slate-900 font-mono mt-1">
             {appointment.bookedTime}
           </div>
-          <span className="text-[10px] text-slate-400 block mt-0.5">Fixed audit slot</span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Fixed booking time</span>
         </div>
 
-        {/* Current Expected Consultation Time or Next in Queue */}
+        {/* 2. Expected Consultation Time (Dynamically Updated) */}
         {isNextInQueue ? (
-          <div className="p-3 bg-amber-50/90 rounded-xl border border-amber-300">
+          <div className="p-3 bg-amber-50/90 rounded-xl border border-amber-300 shadow-2xs">
             <span className="text-[11px] font-bold text-amber-800 block uppercase tracking-wider">
-              Queue Position
+              Expected Consultation
             </span>
             <div className="text-lg sm:text-xl font-black text-amber-950 uppercase tracking-tight mt-1 flex items-center gap-1.5 font-mono">
               <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
               Next in Queue
             </div>
-            <span className="text-[10px] text-amber-800 font-medium block mt-0.5">Please be ready at door</span>
+            <span className="text-[10px] text-amber-800 font-medium block mt-0.5 font-mono">
+              Around {appointment.expectedConsultationTime || appointment.bookedTime}
+            </span>
           </div>
         ) : (
-          <div className="p-3 bg-teal-50/80 rounded-xl border border-teal-200">
+          <div className="p-3 bg-teal-50/80 rounded-xl border border-teal-200 shadow-2xs">
             <span className="text-[11px] font-bold text-teal-800 block uppercase tracking-wider">
-              Current Expected Time
+              Expected Consultation
             </span>
             <div className="text-xl sm:text-2xl font-black text-teal-900 font-mono mt-1">
               {appointment.expectedConsultationTime}
             </div>
-            <span className="text-[10px] text-teal-700 block mt-0.5">Dynamically updated</span>
+            <span className="text-[10px] text-teal-700 block mt-0.5 font-medium">
+              Around {appointment.expectedConsultationTime}
+            </span>
           </div>
         )}
 
-        {/* Please Arrive By / Check-in Completed */}
-        {Boolean(
+        {/* 3. Current Delay (Expected - Booked) */}
+        <div className={`p-3 rounded-xl border shadow-2xs ${
+          delayDifference > 0
+            ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+            : 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+        }`}>
+          <span className="text-[11px] font-bold block uppercase tracking-wider">
+            Current Delay
+          </span>
+          <div className="text-xl sm:text-2xl font-black font-mono mt-1">
+            {delayDifference > 0 ? `+${delayDifference} min` : 'On schedule'}
+          </div>
+          <span className="text-[10px] block mt-0.5 font-medium">
+            {delayDifference > 0 ? `About ${delayDifference} minutes` : 'On schedule'}
+          </span>
+        </div>
+
+        {/* 4. Arrival Guidance / Travel Advice */}
+        {appointment.status === 'WITH_DOCTOR' ? (
+          <div className="p-3 bg-emerald-50/90 rounded-xl border border-emerald-300 shadow-2xs">
+            <span className="text-[11px] font-bold text-emerald-800 block uppercase tracking-wider">
+              Chamber Status
+            </span>
+            <div className="text-sm sm:text-base font-black text-emerald-950 mt-1">
+              Consultation started
+            </div>
+            <span className="text-[10px] text-emerald-700 block mt-0.5 font-mono">
+              Started at {appointment.consultationStartTime || 'recently'}
+            </span>
+          </div>
+        ) : Boolean(
           appointment.actualArrivalTime ||
-          ['ARRIVED', 'WAITING', 'WITH_DOCTOR', 'COMPLETED'].includes(appointment.status)
+          ['ARRIVED', 'WAITING', 'COMPLETED'].includes(appointment.status)
         ) ? (
-          <div className="p-3 bg-emerald-50/90 rounded-xl border border-emerald-300">
+          <div className="p-3 bg-emerald-50/90 rounded-xl border border-emerald-300 shadow-2xs">
             <span className="text-[11px] font-bold text-emerald-800 block uppercase tracking-wider flex items-center gap-1">
               <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-              Check-in Completed
+              Arrival Status
             </span>
-            <div className="text-xl sm:text-2xl font-black text-emerald-950 font-mono mt-1">
-              {appointment.actualArrivalTime ? appointment.actualArrivalTime : 'At Hospital'}
+            <div className="text-sm sm:text-base font-black text-emerald-950 mt-1">
+              Checked in
             </div>
             <span className="text-[10px] text-emerald-700 block mt-0.5 font-medium">
-              {appointment.status === 'WITH_DOCTOR'
-                ? 'Inside consultation room'
-                : appointment.status === 'COMPLETED'
-                ? 'Consultation concluded'
-                : 'Waiting in hospital lounge'}
+              Checked in—please wait for your call
             </span>
           </div>
         ) : (
-          <div className="p-3 bg-sky-50/80 rounded-xl border border-sky-200">
+          <div className="p-3 bg-sky-50/80 rounded-xl border border-sky-200 shadow-2xs">
             <span className="text-[11px] font-bold text-sky-800 block uppercase tracking-wider">
               Please Arrive By
             </span>
             <div className="text-xl sm:text-2xl font-black text-sky-950 font-mono mt-1">
               {appointment.recommendedArrivalTime}
             </div>
-            <span className="text-[10px] text-sky-700 block mt-0.5">15 min before expected</span>
+            <span className="text-[10px] text-sky-700 block mt-0.5">15 min buffer before expected</span>
           </div>
         )}
+      </div>
+
+      {/* PDF Section 7: Delay Trend Notification Banner */}
+      {expectedTrend && (
+        <div className="px-4 py-2.5 rounded-xl bg-teal-50 border border-teal-200 text-xs font-semibold text-teal-900 flex items-center gap-2 mb-2 animate-in fade-in">
+          <span>ℹ️</span>
+          <span>{expectedTrend}</span>
+        </div>
+      )}
+
+      {/* Reassurance text */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-500">
+        <span className="italic">Consultation time may change as earlier visits finish.</span>
+        <span className="font-mono text-slate-400">Last updated: {config.simulatedTime}</span>
       </div>
 
       {/* Children Ahead & Queue Progress Bar */}

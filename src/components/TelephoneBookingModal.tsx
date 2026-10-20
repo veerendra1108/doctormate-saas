@@ -13,6 +13,7 @@ import {
   ShieldCheck,
   Building,
   UserCheck,
+  RefreshCw,
 } from 'lucide-react';
 import { Doctor, SlotAvailability } from '../types/index.js';
 
@@ -23,7 +24,9 @@ interface TelephoneBookingModalProps {
   hospitalName?: string;
   doctors: Doctor[];
   selectedDoctorId?: string;
-  onBookingSuccess: () => void;
+  defaultDate?: string;
+  availabilityVersion?: number;
+  onBookingSuccess: (source?: 'PHONE' | 'WALK_IN' | 'OTHER') => void;
 }
 
 export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
@@ -33,6 +36,8 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
   hospitalName = 'Doctormate Hospital',
   doctors,
   selectedDoctorId,
+  defaultDate,
+  availabilityVersion = 0,
   onBookingSuccess,
 }) => {
   const [bookingSource, setBookingSource] = useState<'PHONE' | 'WALK_IN' | 'OTHER'>('PHONE');
@@ -41,7 +46,10 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
   const [patientAge, setPatientAge] = useState('');
   const [guardianName, setGuardianName] = useState('');
   const [doctorId, setDoctorId] = useState(selectedDoctorId || doctors[0]?.id || '');
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(() => {
+    const cached = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null;
+    return defaultDate || cached || new Date().toISOString().split('T')[0];
+  });
   const [selectedSlot, setSelectedSlot] = useState('');
   const [slots, setSlots] = useState<SlotAvailability[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
@@ -65,39 +73,107 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
 
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
-    if (selectedDoctorId) {
-      setDoctorId(selectedDoctorId);
-    } else if (doctors.length > 0 && !doctorId) {
-      setDoctorId(doctors[0].id);
-    }
-  }, [selectedDoctorId, doctors]);
+  const prevIsOpenRef = React.useRef(isOpen);
+  const prevVersionRef = React.useRef(availabilityVersion);
+  const fetchRequestIdRef = React.useRef(0);
 
-  // Fetch slots whenever doctor, date or hospitalId changes
-  useEffect(() => {
-    if (!doctorId || !date) return;
-    const fetchSlots = async () => {
+  // Fetch slots with request-sequence guard to prevent stale responses from replacing newer state
+  const fetchSlots = React.useCallback(
+    async (targetDoctorId?: string, targetDate?: string) => {
+      const activeDocId = targetDoctorId || doctorId;
+      const activeDate = targetDate || date;
+      if (!activeDocId || !activeDate) return;
+
+      const currentRequestId = ++fetchRequestIdRef.current;
       setLoadingSlots(true);
-      setSelectedSlot('');
       try {
-        const doctor = doctors.find((d) => d.id === doctorId);
+        const doctor = doctors.find((d) => d.id === activeDocId);
         const branchId = doctor?.branches[0] || 'main';
-        const res = await fetch(`/api/slots?doctorId=${doctorId}&branchId=${branchId}&date=${date}`);
+        const res = await fetch(
+          `/api/slots?doctorId=${encodeURIComponent(activeDocId)}&branchId=${encodeURIComponent(branchId)}&date=${encodeURIComponent(activeDate)}&_t=${Date.now()}`,
+          { cache: 'no-store' }
+        );
         if (res.ok) {
           const data = await res.json();
-          setSlots(Array.isArray(data) ? data : []);
+          // Prevent stale responses from replacing newer state
+          if (currentRequestId === fetchRequestIdRef.current) {
+            const freshSlots = Array.isArray(data) ? data : [];
+            setSlots(freshSlots);
+            // Retain selected slot only if still available
+            setSelectedSlot((prev) => {
+              if (!prev) return '';
+              const match = freshSlots.find((s: SlotAvailability) => s.time === prev);
+              return match && match.available ? prev : '';
+            });
+          }
         } else {
-          setSlots([]);
+          if (currentRequestId === fetchRequestIdRef.current) {
+            setSlots([]);
+          }
         }
       } catch (err) {
-        console.error('Failed to load slots:', err);
-        setSlots([]);
+        if (currentRequestId === fetchRequestIdRef.current) {
+          console.error('Failed to load slots:', err);
+          setSlots([]);
+        }
       } finally {
-        setLoadingSlots(false);
+        if (currentRequestId === fetchRequestIdRef.current) {
+          setLoadingSlots(false);
+        }
       }
-    };
-    fetchSlots();
-  }, [doctorId, date, doctors]);
+    },
+    [doctorId, date, doctors]
+  );
+
+  // Initialize doctor selection and date, and ALWAYS fetch fresh availability whenever modal opens
+  useEffect(() => {
+    if (isOpen) {
+      const isJustOpened = !prevIsOpenRef.current;
+      let effectiveDocId = doctorId;
+      let effectiveDate = date;
+
+      if (isJustOpened) {
+        effectiveDocId = (selectedDoctorId && doctors.some((d) => d.id === selectedDoctorId))
+          ? selectedDoctorId
+          : (doctorId || doctors[0]?.id || '');
+        const cached = typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null;
+        effectiveDate = defaultDate || cached || date || new Date().toISOString().split('T')[0];
+
+        setDoctorId(effectiveDocId);
+        setDate(effectiveDate);
+        setSelectedSlot('');
+        setError(null);
+        setConfirmedBooking(null);
+      }
+
+      fetchSlots(effectiveDocId, effectiveDate);
+    }
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, selectedDoctorId, doctors, defaultDate, fetchSlots]);
+
+  // Refetch slots when availabilityVersion changes while modal is open
+  useEffect(() => {
+    if (isOpen && availabilityVersion !== prevVersionRef.current) {
+      prevVersionRef.current = availabilityVersion;
+      fetchSlots();
+    }
+  }, [isOpen, availabilityVersion, fetchSlots]);
+
+  useEffect(() => {
+    if (defaultDate && isOpen) {
+      setDate(defaultDate);
+    }
+  }, [defaultDate, isOpen]);
+
+  // Fallback if doctorId is empty but doctors list loads
+  useEffect(() => {
+    if (!doctorId && doctors.length > 0) {
+      const initialDocId = (selectedDoctorId && doctors.some((d) => d.id === selectedDoctorId))
+        ? selectedDoctorId
+        : doctors[0].id;
+      setDoctorId(initialDocId);
+    }
+  }, [doctors, doctorId, selectedDoctorId]);
 
   // Check existing patient phone matching (without forced auto-merging)
   useEffect(() => {
@@ -190,17 +266,24 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
         );
       }
 
+      const savedAppt = data.appointment;
+      const confirmedDoctorName = savedAppt?.doctorName || doctor?.name || 'Assigned Doctor';
+      const confirmedToken = savedAppt?.appointmentNumber || data.token || data.appointmentNumber;
+      const confirmedTime = savedAppt?.bookedTime || selectedSlot;
+      const confirmedDate = savedAppt?.date || date;
+      const confirmedPatientName = savedAppt?.childName || patientName.trim();
+
       setConfirmedBooking({
-        appointmentNumber: data.token,
-        patientName: patientName.trim(),
-        doctorName: doctor?.name || 'Assigned Doctor',
-        bookedTime: selectedSlot,
-        date,
+        appointmentNumber: confirmedToken,
+        patientName: confirmedPatientName,
+        doctorName: confirmedDoctorName,
+        bookedTime: confirmedTime,
+        date: confirmedDate,
         trackerUrl: fullTrackerUrl,
         confirmationText: fullConfirmationText,
       });
 
-      onBookingSuccess();
+      onBookingSuccess(bookingSource);
     } catch (err: any) {
       setError(err.message || 'Error occurred while saving appointment.');
     } finally {
@@ -468,8 +551,14 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
                     Doctor <span className="text-rose-500">*</span>
                   </label>
                   <select
+                    id="phone-booking-doctor-select"
                     value={doctorId}
-                    onChange={(e) => setDoctorId(e.target.value)}
+                    onChange={(e) => {
+                      const newDoc = e.target.value;
+                      setDoctorId(newDoc);
+                      setSelectedSlot('');
+                      fetchSlots(newDoc, date);
+                    }}
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium bg-white"
                   >
                     {doctors.map((d) => (
@@ -486,8 +575,13 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
                   <input
                     type="date"
                     value={date}
-                    min={new Date().toISOString().split('T')[0]}
-                    onChange={(e) => setDate(e.target.value)}
+                    min={defaultDate || (typeof window !== 'undefined' ? localStorage.getItem('doctormate_simulated_date') : null) || new Date().toISOString().split('T')[0]}
+                    onChange={(e) => {
+                      const newDate = e.target.value;
+                      setDate(newDate);
+                      setSelectedSlot('');
+                      fetchSlots(doctorId, newDate);
+                    }}
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium bg-white"
                     required
                   />
@@ -497,9 +591,26 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
               {/* Available Slots Grid */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                    Available Slot <span className="text-rose-500">*</span>
-                  </label>
+                  <div className="flex items-center space-x-2">
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Available Slot <span className="text-rose-500">*</span>
+                    </label>
+                    <button
+                      type="button"
+                      id="phone-booking-refresh-slots-btn"
+                      onClick={() => fetchSlots()}
+                      disabled={loadingSlots}
+                      title="Refresh slot availability"
+                      className="p-1 text-slate-400 hover:text-teal-600 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loadingSlots ? 'animate-spin text-teal-600' : ''}`} />
+                    </button>
+                    {loadingSlots && slots.length > 0 && (
+                      <span className="text-[10px] text-teal-600 animate-pulse font-medium">
+                        Syncing live availability...
+                      </span>
+                    )}
+                  </div>
                   {currentDoctor && (
                     <span className="text-xs text-teal-700 font-semibold bg-teal-50 px-2 py-0.5 rounded">
                       Doctor slot length: {currentDoctor.slotDurationMinutes || 15} mins
@@ -507,15 +618,41 @@ export const TelephoneBookingModal: React.FC<TelephoneBookingModalProps> = ({
                   )}
                 </div>
 
-                {loadingSlots ? (
-                  <div className="py-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-100">
-                    Calculating available slots...
+                {loadingSlots && slots.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-center space-x-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-teal-600" />
+                    <span>Syncing latest slot availability...</span>
                   </div>
-                ) : slots.length === 0 ? (
-                  <div className="py-6 text-center text-xs text-amber-700 bg-amber-50 rounded-xl border border-amber-200">
-                    No available consultation slots for this doctor on the selected date.
-                  </div>
-                ) : (
+                ) : (() => {
+                  const dateParts = date ? date.split('-').map(Number) : [];
+                  const selectedDayOfWeek = dateParts.length === 3
+                    ? new Date(dateParts[0], dateParts[1] - 1, dateParts[2]).getDay()
+                    : new Date(date).getDay();
+                  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                  const selectedDayName = dayNames[selectedDayOfWeek] || 'this day';
+
+                  const doctorAvailableDays = currentDoctor?.availableDays || [1, 2, 3, 4, 5, 6];
+                  const isDoctorScheduled = Array.isArray(doctorAvailableDays) && doctorAvailableDays.includes(selectedDayOfWeek);
+
+                  if (!isDoctorScheduled) {
+                    return (
+                      <div className="py-6 px-4 text-center text-xs text-amber-800 bg-amber-50 rounded-xl border border-amber-200">
+                        <p className="font-semibold">{currentDoctor?.name || 'Doctor'} is not scheduled on {selectedDayName}s.</p>
+                        <p className="text-[11px] text-amber-600 mt-1">Please select an alternate date for this doctor.</p>
+                      </div>
+                    );
+                  }
+
+                  if (slots.length === 0) {
+                    return (
+                      <div className="py-6 text-center text-xs text-amber-700 bg-amber-50 rounded-xl border border-amber-200">
+                        No available consultation slots for this doctor on the selected date.
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })() || (
                   <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-36 overflow-y-auto p-1 bg-slate-50 rounded-xl border border-slate-100">
                     {slots.map((slot) => {
                       const isAvailable = slot.available;
